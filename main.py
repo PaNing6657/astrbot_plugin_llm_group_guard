@@ -446,11 +446,10 @@ class LLMGroupGuardPlugin(Star):
             oid = str(verdict.get("oid") or "").strip()
             # OID 必须是纯数字；缺失或非数字均视为无效
             oid_valid = has_oid and oid.isdigit() and len(oid) >= 4
-            detail = str(verdict.get("comment") or "").strip()[:80]
             if has_nickname and oid_valid:
                 await self._approve_join(event, group_id, user_id, flag, oid)
             else:
-                await self._reject_join(event, group_id, user_id, flag, has_nickname, oid_valid, detail)
+                await self._reject_join(event, group_id, user_id, flag, has_nickname, oid_valid)
         except Exception as e:
             logger.error(f"[Guard] 入群申请自动审批异常: {e}")
 
@@ -492,16 +491,14 @@ class LLMGroupGuardPlugin(Star):
         except Exception as e:
             logger.warning(f"[Guard] 修改名片失败: 群 {group_id} 用户 {user_id}: {e}")
 
-    async def _reject_join(self, event, group_id, user_id, flag, has_nickname, oid_valid, detail: str) -> None:
-        """拒绝入群，并在理由中写明缺失部分。"""
+    async def _reject_join(self, event, group_id, user_id, flag, has_nickname, oid_valid) -> None:
+        """拒绝入群，理由控制在 15 字以内。"""
         missing = []
         if not has_nickname:
             missing.append("昵称")
         if not oid_valid:
             missing.append("OID")
-        reason = f"入群申请缺少{('、'.join(missing))}，请填写昵称与OID后重新申请"
-        if detail:
-            reason += f"。{detail}"
+        reason = f"缺少{'与'.join(missing)}，请补充后重试" if missing else "入群申请信息不符合要求"
         try:
             await event.bot.api.call_action(
                 "set_group_add_request", flag=flag, sub_type="add", approve=False, reason=reason
