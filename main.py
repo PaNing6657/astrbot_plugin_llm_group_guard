@@ -401,7 +401,7 @@ class LLMGroupGuardPlugin(Star):
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_group_increase(self, event: AstrMessageEvent):
-        """成员进群事件：审批通过者发审批欢迎词并改名片；其他进群发默认欢迎词、不改名片。"""
+        """成员进群事件：AI 放行者发审批欢迎词并改名片；其余（人工批/直接进群）发普通欢迎词，人工批也改名片。"""
         try:
             raw = getattr(event.message_obj, "raw_message", None)
             if not isinstance(raw, dict):
@@ -414,7 +414,7 @@ class LLMGroupGuardPlugin(Star):
             if not group_id or not user_id or user_id == str(raw.get("operator_id") or ""):
                 return  # 无群/无用户，或为机器人自身进群时跳过
 
-            # 审批通过者在 _approve_join 时记录了 OID 缓存；据此区分审批/非审批
+            # 有缓存说明 AI 识别到 OID 并走审批（含人工先批场景）：发普通欢迎词并改名片；否则发第二套欢迎词、不改名片
             cache_oid = (self._join_oid.get(group_id) or {}).get(user_id)
             approved = bool(cache_oid)
             oid = ""
@@ -510,16 +510,16 @@ class LLMGroupGuardPlugin(Star):
             logger.error(f"[Guard] 入群申请自动审批异常: {e}")
 
     async def _approve_join(self, event, group_id, user_id, flag, oid: str) -> None:
-        """同意入群，并异步延迟执行自动改名片（QQ昵称_OID）。"""
+        """同意入群并记录 OID；即使 approve 未生效（如已被人工先批），仍按 AI 审批流程处理。"""
         try:
             await event.bot.api.call_action(
                 "set_group_add_request", flag=flag, sub_type="add", approve=True, reason="已填写昵称与OID(UID)，审核通过"
             )
             logger.info(f"[Guard] 群 {group_id} 已同意用户 {user_id} 入群（OID={oid}）")
         except Exception as e:
-            logger.error(f"[Guard] 同意入群失败: 群 {group_id} 用户 {user_id}: {e}")
-            return
-        # 记录 OID 供进群欢迎使用（进群事件里取不到则回退到名片提取）
+            # 常见于已被人工先一步审批：不中断，仍发普通欢迎词并改名片
+            logger.warning(f"[Guard] 同意入群失败（可能已被人工审批）: 群 {group_id} 用户 {user_id}: {e}")
+        # 记录 OID 供进群事件选欢迎词与改名片使用
         self._join_oid.setdefault(str(group_id), {})[str(user_id)] = oid
         # 用户进群后自动改名片为 QQ昵称_OID（对方需实际入群，延迟重试）
         asyncio.create_task(self._set_card_after_join(event.bot, group_id, user_id, oid))
