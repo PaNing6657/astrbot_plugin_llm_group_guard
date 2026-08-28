@@ -25,7 +25,6 @@ const CONFIG_FIELDS = [
   { key: "guard_notice", label: "违规通知消息", type: "text", full: true, hint: "支持 {user_id} {duration} {count} 占位符，留空不发送" },
   { key: "keyword_guard_enable", label: "关键词检测", type: "toggle", hint: "命中关键词即判违规，机制同 LLM 审核但独立计数" },
   { key: "keyword_list", label: "违规关键词（逗号分隔）", type: "csv", full: true, hint: "消息包含任一关键词即判违规" },
-  { key: "join_verify_enable", label: "自动审批入群", type: "toggle", hint: "LLM 检测入群信息含昵称+OID 则同意并改名，缺失则拒绝" },
   { key: "user_whitelist", label: "用户白名单（逗号分隔）", type: "csv", full: true },
   { key: "whole_ban_enable_msg", label: "开启禁言通知", type: "text", full: true, hint: "支持 {start_time} {end_time}" },
   { key: "whole_ban_disable_msg", label: "解除禁言通知", type: "text", full: true },
@@ -60,6 +59,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
     $("page-" + btn.dataset.tab).classList.add("active");
     if (btn.dataset.tab === "violations") loadViolations();
     if (btn.dataset.tab === "schedules") loadSchedules();
+    if (btn.dataset.tab === "join") loadJoin();
     if (btn.dataset.tab === "groups") loadGroups();
   });
 });
@@ -308,6 +308,40 @@ $("setSchedule").addEventListener("click", async () => {
     loadSchedules();
   } catch (e) {
     toast("scheduleToast", "设置失败：" + e, true);
+  }
+});
+
+/* ---------- 入群审批 ---------- */
+// toggle 开关交互（点击切换高亮）
+function bindToggle(el, on) {
+  el.classList.toggle("on", !!on);
+  el.removeEventListener("click", toggleHandler);
+  el.addEventListener("click", toggleHandler);
+}
+function toggleHandler(e) {
+  e.currentTarget.classList.toggle("on");
+}
+
+async function loadJoin() {
+  const data = await api("config");
+  bindToggle($("joinVerifyToggle"), data.join_verify_enable);
+  bindToggle($("joinCardNotifyToggle"), data.join_card_notify);
+  $("joinWelcome").value = data.join_welcome_msg || "";
+  $("joinCardNotifyMsg").value = data.join_card_notify_msg || "";
+}
+$("saveJoin").addEventListener("click", async () => {
+  // config/update 只更新提交的字段，未提交项保持不变，无需回填
+  const payload = {
+    join_verify_enable: $("joinVerifyToggle").classList.contains("on"),
+    join_welcome_msg: $("joinWelcome").value,
+    join_card_notify: $("joinCardNotifyToggle").classList.contains("on"),
+    join_card_notify_msg: $("joinCardNotifyMsg").value,
+  };
+  try {
+    await api("config/save", "POST", payload);
+    toast("joinToast", "已保存");
+  } catch (e) {
+    toast("joinToast", "保存失败：" + e, true);
   }
 });
 

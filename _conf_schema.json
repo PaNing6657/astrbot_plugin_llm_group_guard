@@ -123,6 +123,24 @@
     "hint": "开启后，加群申请由 LLM 自动检测验证信息：同时包含昵称和OID(UID)则同意入群，并将群名片自动改为『QQ昵称_OID』；缺失或格式不符则拒绝并写明理由。需配置 LLM。失败时跳过自动审批留给管理员",
     "default": false
   },
+  "join_welcome_msg": {
+    "type": "string",
+    "description": "进群欢迎消息",
+    "hint": "审批通过者进群后发送到群里的欢迎语，支持占位符 {at_user}(@该用户)、{nickname}(QQ昵称)、{oid}(OID)、{user_id}(QQ号)；留空不发送",
+    "default": "欢迎 {nickname} 加入本群！OID：{oid}"
+  },
+  "join_card_notify": {
+    "type": "bool",
+    "description": "修改昵称后发送提示",
+    "hint": "开启后，将成员名片改为『QQ昵称_OID』后，会向群里发送下方自定义提示语；关闭则不发送",
+    "default": true
+  },
+  "join_card_notify_msg": {
+    "type": "string",
+    "description": "修改昵称提示语",
+    "hint": "改名片后发送的提示，支持占位符 {new_card}(新名片)、{nickname}、{oid}、{user_id}；留空则不发送",
+    "default": "已自动将 {nickname} 的群名片修改为 {new_card}"
+  },
   "keyword_list": {
     "type": "list",
     "description": "违规关键词列表",

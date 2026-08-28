@@ -23,6 +23,7 @@
     <button class="tab active" data-tab="config">配置</button>
     <button class="tab" data-tab="violations">违规记录</button>
     <button class="tab" data-tab="schedules">定时禁言</button>
+    <button class="tab" data-tab="join">入群审批</button>
     <button class="tab" data-tab="groups">群管理</button>
   </nav>
 
@@ -91,6 +92,48 @@
             <tbody id="scheduleBody"></tbody>
           </table>
           <div class="empty" id="scheduleEmpty">暂无定时禁言任务</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 入群审批 -->
+    <section class="page" id="page-join">
+      <div class="page-head">
+        <h2>入群审批</h2>
+        <span class="page-note">LLM 自动审批 + 进群欢迎 / 改名提示</span>
+      </div>
+      <div class="card">
+        <div class="toggle-row" style="margin-bottom: 14px;">
+          <div>
+            <div class="t-label">自动审批入群</div>
+            <div class="t-hint">LLM 检测申请信息：含昵称+OID 则同意并入群后改名片，缺失则拒绝</div>
+          </div>
+          <div class="toggle" id="joinVerifyToggle" data-key="join_verify_enable"></div>
+        </div>
+
+        <div class="field" style="margin-top: 16px;">
+          <label>进群欢迎消息</label>
+          <textarea id="joinWelcome" placeholder="例如：欢迎 {at_user} 加入本群！OID：{oid}"></textarea>
+          <p class="hint">审批通过进群后发送到群里的欢迎语，支持 {at_user}(@该用户) {nickname} {oid} {user_id}，留空不发送</p>
+        </div>
+
+        <div class="toggle-row" style="margin: 16px 0 14px;">
+          <div>
+            <div class="t-label">修改昵称后发送提示</div>
+            <div class="t-hint">名片改为『QQ昵称_OID』后是否向群里发送提示语</div>
+          </div>
+          <div class="toggle" id="joinCardNotifyToggle" data-key="join_card_notify"></div>
+        </div>
+
+        <div class="field">
+          <label>修改昵称提示语</label>
+          <textarea id="joinCardNotifyMsg" placeholder="例如：已自动将 {nickname} 的群名片修改为 {new_card}"></textarea>
+          <p class="hint">改名片后发送的提示，支持 {new_card} {nickname} {oid} {user_id}，留空不发送</p>
+        </div>
+
+        <div class="actions">
+          <button class="btn primary" id="saveJoin">保存入群设置</button>
+          <span class="toast" id="joinToast"></span>
         </div>
       </div>
     </section>

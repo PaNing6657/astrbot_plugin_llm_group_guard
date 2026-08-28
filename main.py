@@ -5,6 +5,7 @@ from typing import Optional
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
+from astrbot.api.message_components import At, Plain
 from astrbot.api.star import Context, Star, register
 from astrbot.api.web import error_response, json_response, request
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
@@ -466,8 +467,9 @@ class LLMGroupGuardPlugin(Star):
         asyncio.create_task(self._set_card_after_join(event.bot, group_id, user_id, oid))
 
     async def _set_card_after_join(self, bot, group_id, user_id, oid: str) -> None:
-        """入群后把名片改为『QQ昵称_OID』；未及时入群则重试数次。"""
+        """入群后：发送欢迎、改名片为『QQ昵称_OID』、按配置发送改名提示。"""
         card = None
+        nickname = None
         for _ in range(6):
             await asyncio.sleep(8)  # 等待对方真正进群
             try:
@@ -480,8 +482,21 @@ class LLMGroupGuardPlugin(Star):
             except Exception as e:
                 logger.debug(f"[Guard] 等待入群获取昵称失败: {e}")
         if not card:
-            logger.warning(f"[Guard] 群 {group_id} 用户 {user_id} 入群后未取到昵称，跳过改名片")
+            logger.warning(f"[Guard] 群 {group_id} 用户 {user_id} 入群后未取到昵称，跳过欢迎与改名")
             return
+
+        # 进群欢迎（自定义，支持 {at_user} 实现 @该用户）
+        welcome = str(self.config.get("join_welcome_msg") or "").strip()
+        if welcome:
+            try:
+                await bot.send_group_msg(
+                    group_id=int(group_id),
+                    message=self._build_join_welcome(welcome, nickname, oid, user_id),
+                )
+            except Exception as e:
+                logger.warning(f"[Guard] 进群欢迎发送失败: 群 {group_id} 用户 {user_id}: {e}")
+
+        # 改名片
         try:
             await bot.api.call_action(
                 "set_group_card", group_id=int(group_id), user_id=int(user_id), card=card
@@ -489,6 +504,40 @@ class LLMGroupGuardPlugin(Star):
             logger.info(f"[Guard] 群 {group_id} 已将用户 {user_id} 名片改为 {card}")
         except Exception as e:
             logger.warning(f"[Guard] 修改名片失败: 群 {group_id} 用户 {user_id}: {e}")
+            return
+
+        # 改名后的提示（开关 + 自定义文案）
+        if self.config.get("join_card_notify"):
+            tip = str(self.config.get("join_card_notify_msg") or "").strip()
+            if tip:
+                try:
+                    await bot.send_group_msg(
+                        group_id=int(group_id),
+                        message=tip.replace("{new_card}", card)
+                        .replace("{nickname}", nickname)
+                        .replace("{oid}", oid)
+                        .replace("{user_id}", user_id),
+                    )
+                except Exception as e:
+                    logger.warning(f"[Guard] 改名提示发送失败: 群 {group_id} 用户 {user_id}: {e}")
+
+    @staticmethod
+    def _build_join_welcome(template: str, nickname: str, oid: str, user_id: str) -> list:
+        """把欢迎模板编译为消息段：{at_user} 替换成 @ 该用户（可多次出现）。"""
+        pieces = template.split("{at_user}")
+        components = []
+        for i, piece in enumerate(pieces):
+            if piece:
+                components.append(
+                    Plain(
+                        piece.replace("{nickname}", nickname)
+                        .replace("{oid}", oid)
+                        .replace("{user_id}", user_id)
+                    )
+                )
+            if i < len(pieces) - 1:
+                components.append(At(qq=user_id))
+        return components
 
     async def _reject_join(self, event, group_id, user_id, flag, has_nickname, oid_valid) -> None:
         """拒绝入群，理由控制在 15 字以内。"""
