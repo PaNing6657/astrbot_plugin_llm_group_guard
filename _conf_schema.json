@@ -111,12 +111,6 @@
     "hint": "判定违规并处置后发送到群里的提示，支持占位符 {user_id}、{duration}、{count}（累计违规次数）；留空则不发送",
     "default": ""
   },
-  "rude_ban_enable": {
-    "type": "bool",
-    "description": "粗鲁禁言（AI 对话中用户言语粗鲁时随机禁言 1~10 分钟）",
-    "hint": "开启后，用户在群内与 AI 聊天时若言语粗鲁/无礼/辱骂，AI 可调用工具随机禁言该用户 1~10 分钟；关闭则工具被拒绝",
-    "default": false
-  },
   "keyword_guard_enable": {
     "type": "bool",
     "description": "开启关键词检测",

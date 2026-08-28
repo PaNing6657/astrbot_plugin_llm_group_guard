@@ -23,7 +23,6 @@ const CONFIG_FIELDS = [
   { key: "guard_risk_as_violation", label: "风控拦截视为违规", type: "toggle" },
   { key: "guard_prompt", label: "审核要求（自定义）", type: "textarea", full: true, hint: "写清本群禁止内容，LLM 侧重审核" },
   { key: "guard_notice", label: "违规通知消息", type: "text", full: true, hint: "支持 {user_id} {duration} {count} 占位符，留空不发送" },
-  { key: "rude_ban_enable", label: "粗鲁禁言", type: "toggle", hint: "用户对 AI 言语粗鲁时 AI 可随机禁言 1~10 分钟" },
   { key: "keyword_guard_enable", label: "关键词检测", type: "toggle", hint: "命中关键词即判违规，机制同 LLM 审核但独立计数" },
   { key: "keyword_list", label: "违规关键词（逗号分隔）", type: "csv", full: true, hint: "消息包含任一关键词即判违规" },
   { key: "join_verify_enable", label: "自动审批入群", type: "toggle", hint: "LLM 检测入群信息含昵称+OID 则同意并改名，缺失则拒绝" },

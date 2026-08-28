@@ -1,5 +1,4 @@
 import asyncio
-import random
 import re
 import time
 from typing import Optional
@@ -713,8 +712,9 @@ class LLMGroupGuardPlugin(Star):
                     return {"status": "error", "message": error_msg}
 
             seconds = min(max(int(duration or 600), 1), self._BAN_MAX_SECONDS)
+            # 静默执行：不向群里发“已禁言成员”提示，由 AI 在回复中说明
             ok = await self._exec_member_ban(
-                event, group_id, target_qq, target_name, seconds, unban=not enable
+                event, group_id, target_qq, target_name, seconds, unban=not enable, notify=False
             )
             if not ok:
                 return {"status": "error", "message": f"对 {target_name or target_qq} 的操作失败，请检查权限或目标身份"}
@@ -723,44 +723,6 @@ class LLMGroupGuardPlugin(Star):
             return {"status": "success", "message": f"已对成员 {target_name or target_qq} 执行{action}"}
         except Exception as e:
             logger.error(f"禁言成员 LLM 工具执行异常: {e}")
-            return {"status": "error", "message": f"操作失败: {e}"}
-
-    @filter.llm_tool(name="ban_rude_user")
-    async def ban_rude_user(self, event: AiocqhttpMessageEvent, reason: str = "") -> dict:
-        """
-        当与你聊天的用户言语粗鲁、无礼、辱骂或态度恶劣时，调用本工具随机禁言该用户 1~10 分钟以示惩戒。
-        仅当你确实认为对方刚才对你不敬时使用，请不要滥用或报复性禁言。
-        Args:
-            reason(string): 简要说明用户粗鲁的原因（如 "用户辱骂我"），仅用于记录，可留空。
-        """
-        event = unwrap_event(event)
-        try:
-            # 配置开关：未开启则拒绝执行（由配置页 rude_ban_enable 控制）
-            if not self.config.get("rude_ban_enable"):
-                return {"status": "error", "message": "管理员未开启“粗鲁禁言”功能，本次不予执行"}
-            group_id = event.get_group_id()
-            if not group_id:
-                return {"status": "error", "message": "仅可在群聊中禁言，当前会话不在群内"}
-            target_qq = str(event.get_sender_id())
-            # 随机禁言 1~10 分钟；静默执行，由 AI 在回复中说明
-            seconds = random.randint(60, 600)
-            ok = await self._exec_member_ban(
-                event, group_id, target_qq, "", seconds, unban=False, notify=False
-            )
-            if not ok:
-                return {"status": "error", "message": "禁言失败，请检查机器人权限与目标身份"}
-            logger.info(
-                f"群 {group_id} 粗鲁禁言：用户 {target_qq} 禁言 {seconds} 秒，"
-                f"原因：{reason or '未说明'}，操作者：{event.get_sender_name()}"
-            )
-            # 只把结果交给 LLM，让 AI 用自己的措辞告诉用户
-            return {
-                "status": "success",
-                "message": f"该用户（{target_qq}）因言语粗鲁已被禁言 {seconds // 60} 分钟（{seconds} 秒）。"
-                f"请由你自己向用户说明：你认为其言语粗鲁，因此禁言了 {seconds // 60} 分钟。",
-            }
-        except Exception as e:
-            logger.error(f"粗鲁禁言工具执行异常: {e}")
             return {"status": "error", "message": f"操作失败: {e}"}
 
     # ------------------------------------------------------------------
