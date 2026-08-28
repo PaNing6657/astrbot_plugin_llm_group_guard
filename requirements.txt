@@ -1,0 +1,1 @@
+# 本插件不依赖第三方库，依赖 AstrBot 内置模块与 aiocqhttp 平台

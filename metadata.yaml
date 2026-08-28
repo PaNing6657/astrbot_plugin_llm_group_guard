@@ -1,0 +1,8 @@
+name: astrbot_plugin_llm_group_guard # 插件标识符
+display_name: LLM群守卫 # 用于展示的名字
+desc: 全体禁言（即时/定时）+ LLM 违规消息自动审核（撤回/禁言），支持命令与LLM设置 # 插件描述
+version: V1.0.0 # 插件版本
+author: SatenShiroya # 作者
+support_platforms:
+  - aiocqhttp
+astrbot_version: ">=4.12.0" # 适配的 AstralBot 版本，格式同上

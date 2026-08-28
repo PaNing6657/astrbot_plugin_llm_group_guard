@@ -1,0 +1,93 @@
+<div align="center">
+
+# _LLM 群守卫插件_
+
+_✨ 全体禁言（即时/定时） + LLM 违规消息自动审核 ✨_
+
+[![Plugin Version](https://img.shields.io/badge/Version-V1.0.0-blue.svg)]()
+[![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-ff69b4)](https://github.com/AstrBotDevs/AstrBot)
+[![License](https://img.shields.io/badge/License-AGPL%203.0-green.svg)](LICENSE)
+
+</div>
+
+## ✨ _介绍_
+
+融合三套成熟机制的全新群管插件：
+
+- **全体禁言**：来自 astrbot_plugin_llm_qqgroupTools，支持即时与**定时**（到点自动开禁/解禁，重启不丢任务）
+- **LLM 违规审核**：来自 astrbot_plugin_qqadmin_official，插件内配置 OpenAI 规范 LLM，违规自动处置
+- **撤回/禁言执行**：来自 astrbot_plugin_sentinel 的 OneBot 调用方式——`delete_msg` **可以撤回普通成员消息**（QQ 官方 bot 做不到这一点）
+
+## 🖥️ _WebUI 管理面板_
+
+插件自带 **WebUI 管理面板**（黑蓝简约风）：在 AstrBot 后台的插件详情页打开"guard"页面，支持：
+
+- **配置**：可视化调节全部配置项（LLM 主/备用模型、审核开关与处置、阶梯禁言、通知消息、权限等），保存即生效
+- **违规记录**：查看各群成员累计违规次数，支持单个清零与全部清零
+- **定时禁言**：查看所有群的定时任务（模式/时间/状态），可视化设置（单次/每日/每周）与删除
+- **群管理**：维护**群白名单**（空=管理所有群；填入群号后仅白名单内的群启用 LLM 审核）
+
+## ⌨️ _群内指令_
+
+| 指令 | 说明 |
+|------|------|
+| `/全体禁言` | 立即开启本群全体禁言 |
+| `/解除全体禁言` | 立即解除本群全体禁言 |
+| `/定时禁言 10:00 20:00` | 单次定时禁言：10:00 自动开启，20:00 自动解除 |
+| `/定时禁言 now 90` | 立即开启，90 分钟后自动解除 |
+| `/定时禁言 每日 22:00 06:00` | **每日重复**：每天 22:00 开启、次日 06:00 解除，自动循环直到取消 |
+| `/定时禁言 周一 22:00 06:00` | **按周几设置**：为周一设置独立时段（支持 周一-周五、周末、工作日 等） |
+| `/定时禁言 删除 周一` | 删除指定星期的规则 |
+| `/定时禁言` | 查询本群定时任务（含每日/每周规则） |
+| `/定时禁言 取消` | 取消本群全部定时任务（若禁言已开启会自动解除） |
+
+## 🤖 _LLM 工具（Tools 函数）_
+
+| 函数名 | 说明 |
+|--------|------|
+| `set_group_whole_ban` | 即时全体禁言，参数 `enable`（true/false）|
+| `schedule_group_whole_ban` | 定时全体禁言，参数 `start_time`（now 或 HH:MM）、`end_time`（HH:MM 或分钟数）、`recurring`（true=每日重复）、`weekdays`（如"周一"、"周一-周五"、"周末"）、`reason` |
+
+时间规则：
+
+- 开始时间使用 `HH:MM`，若已过该时刻则自动顺延到明天；亦可用 `now` 表示立即开启
+- 结束时间使用 `HH:MM`，早于或等于开始时间时视为次日凌晨（如 `22:00 06:00` 即到次日早上 6 点解除）；亦可用分钟数表示持续时长
+- **每日模式**（`/定时禁言 每天 22:00 06:00` 或 `recurring=true`）：每天循环执行，跨天自动处理，直到取消；机器人重启后自动恢复
+- **每周模式**（`/定时禁言 周一 22:00 06:00` 或 `weekdays` 参数）：可为每周不同星期设置不同时段，重复设置按星期合并/覆盖，支持 `周一-周五`、`周末`、`工作日` 等快捷写法
+- 单次任务开始时间距当前与持续时长最多不超过 7 天
+
+## 🛡️ _LLM 违规消息审核_
+
+1. 在插件配置中填写 **LLM 接口**：`llm_base_url`、`llm_api_key`、`llm_model`
+2. **多模型自动切换**：可配置备用模型（`llm_fallback_base_urls` / `llm_fallback_api_keys` / `llm_fallback_models` 三组列表**按索引对应**，支持多组）。主模型出现**技术性故障**（请求失败、HTTP 错误、输出截断/空内容、JSON 解析失败）时自动切换到下一个备用模型；**内容风控拦截不切换**（消息已被服务端判定敏感，直接按违规处理）
+3. 开启 `guard_enable`，群内普通成员消息将交由 LLM 判定是否违规
+4. 违规处置由 `guard_action` 控制：
+   - `ban`：仅禁言（默认）
+   - `recall`：仅撤回（**撤回达到 `guard_recall_ban_threshold` 次后自动禁言**，默认 3 次；0=永远只撤回）
+   - `recall_and_ban`：撤回并禁言
+5. **阶梯禁言**（`guard_stair_enable` 默认开启）：同一成员每次违规，禁言时长按 `guard_stair_multiplier`（默认 2）翻倍递增——第 1 次 = `guard_ban_seconds`（默认 600 秒），第 2 次 = 1200 秒，第 3 次 = 2400 秒……封顶 `guard_stair_max_seconds`（默认 1 天）。关闭则固定为基础时长
+6. **审核要求自定义**：在 `guard_prompt` 中写明本群禁止的内容（广告/辱骂/引战/涉黄赌毒等），LLM 会侧重审核
+6. 处置后可配置 `guard_notice` 发送提示消息（支持 `{user_id}`、`{duration}`、`{count}` 占位符）
+7. **风控降级策略**：若 LLM 服务因消息内容高风险直接拒绝请求（`guard_risk_as_violation` 默认开启），将**视为违规直接处置**——服务端拒绝本身即说明内容敏感；关闭则保守跳过
+
+违规次数按群统计并持久化（`violation_counts.json`），机器人重启不丢失。
+
+豁免机制：AstrBot 管理员、群主/群管理员、`user_whitelist` 中的用户不审核；`guard_interval` 控制同一成员审核间隔（**设为 0 关闭节流**，每条消息都审核；默认 30 秒防刷屏造成大量调用）。
+
+## 📌 _自定义通知_
+
+- `whole_ban_enable_msg` / `whole_ban_disable_msg`：开启/解除全体禁言时发送的消息，支持 `{start_time}`、`{end_time}` 占位符，留空不发送
+
+## 📜 _权限控制_
+
+- **Permission_verification**（默认开启）：全体禁言/定时禁言等敏感操作校验操作者权限
+- **allow_groupadmin_use**（默认关闭）：允许群主/群管理员使用本插件功能
+
+## 📦 _安装_
+
+将本目录打包为 zip，在 AstrBot 插件管理页安装；或直接放入 `plugins` 目录后重启。
+
+## 🔗 _相关链接_
+
+- 机器人框架：[AstrBot 官方文档](https://astrbot.app)
+- 客户端使用：[Napcat 官方文档](https://napcat.napneko.icu/)

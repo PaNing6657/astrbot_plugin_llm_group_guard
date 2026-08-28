@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>LLM 群守卫 · 管理台</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="shell">
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-dot"></span>
+      <div class="brand-text">
+        <h1>LLM 群守卫</h1>
+        <p>astrbot_plugin_llm_group_guard</p>
+      </div>
+    </div>
+    <div class="conn"><span class="conn-dot"></span><span id="connText">连接中</span></div>
+  </header>
+
+  <nav class="tabs" id="tabs">
+    <button class="tab active" data-tab="config">配置</button>
+    <button class="tab" data-tab="violations">违规记录</button>
+    <button class="tab" data-tab="schedules">定时禁言</button>
+    <button class="tab" data-tab="groups">群管理</button>
+  </nav>
+
+  <main>
+    <!-- 配置 -->
+    <section class="page active" id="page-config">
+      <div class="page-head">
+        <h2>插件配置</h2>
+        <span class="page-note">修改后点击保存，实时生效</span>
+      </div>
+      <div class="card" id="configForm"></div>
+      <div class="actions">
+        <button class="btn primary" id="saveConfig">保存配置</button>
+        <span class="toast" id="configToast"></span>
+      </div>
+    </section>
+
+    <!-- 违规记录 -->
+    <section class="page" id="page-violations">
+      <div class="page-head">
+        <h2>违规记录</h2>
+        <div class="head-actions">
+          <button class="btn ghost danger" id="resetAllViolations">全部清零</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>群号</th><th>用户</th><th>来源</th><th>累计违规</th><th>最近违规消息</th><th>操作</th></tr>
+            </thead>
+            <tbody id="violationBody"></tbody>
+          </table>
+          <div class="empty" id="violationEmpty">暂无违规记录</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 定时禁言 -->
+    <section class="page" id="page-schedules">
+      <div class="page-head">
+        <h2>定时禁言</h2>
+        <span class="page-note">可视化查看 / 设置 / 删除各群定时任务</span>
+      </div>
+      <div class="card">
+        <div class="schedule-form">
+          <div class="field"><label>群号</label><input id="sGroup" placeholder="如 1104414569"></div>
+          <div class="field"><label>模式</label>
+            <select id="sMode">
+              <option value="once">单次</option>
+              <option value="daily">每日</option>
+              <option value="weekly">每周（按周几）</option>
+            </select>
+          </div>
+          <div class="field"><label>开始 HH:MM</label><input id="sStart" placeholder="22:00 或 now"></div>
+          <div class="field"><label>结束 HH:MM / 分钟</label><input id="sEnd" placeholder="06:00 或 480"></div>
+          <div class="field weekly-only"><label>周几</label><input id="sWeekdays" placeholder="周一-周五 / 周末 / 每天"></div>
+          <button class="btn primary" id="setSchedule">设置</button>
+        </div>
+        <div class="toast" id="scheduleToast"></div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>群号</th><th>模式</th><th>时间</th><th>状态</th><th>操作</th></tr>
+            </thead>
+            <tbody id="scheduleBody"></tbody>
+          </table>
+          <div class="empty" id="scheduleEmpty">暂无定时禁言任务</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 群管理 -->
+    <section class="page" id="page-groups">
+      <div class="page-head">
+        <h2>群管理</h2>
+        <span class="page-note">白名单留空 = 管理所有群</span>
+      </div>
+      <div class="card">
+        <div class="field">
+          <label>受管理群（群白名单）</label>
+          <input id="groupWhitelist" placeholder="多个群号用英文逗号分隔，如 1104414569,123456">
+          <p class="hint">填入群号后，仅白名单内的群启用 LLM 审核；留空则全部群生效</p>
+        </div>
+        <div class="actions">
+          <button class="btn primary" id="saveGroups">保存群白名单</button>
+          <span class="toast" id="groupsToast"></span>
+        </div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<!-- 违规消息历史弹窗 -->
+<div class="modal-mask" id="historyModal">
+  <div class="modal">
+    <div class="modal-head">
+      <h3 id="historyTitle">违规记录</h3>
+      <button class="btn ghost sm" id="historyClose">关闭</button>
+    </div>
+    <div class="modal-body" id="historyList"></div>
+  </div>
+</div>
+
+<!-- module 脚本延迟执行，确保在 AstrBot 注入的 bridge SDK 之后运行 -->
+<script type="module" src="app.js"></script>
+</body>
+</html>
