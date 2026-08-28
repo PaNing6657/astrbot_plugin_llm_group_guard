@@ -120,7 +120,7 @@
   "join_verify_enable": {
     "type": "bool",
     "description": "自动审批入群（LLM 检测昵称与OID）",
-    "hint": "开启后，加群申请由 LLM 自动检测验证信息：同时包含昵称和OID(UID)则同意入群，并将群名片自动改为『QQ昵称_OID』；缺失或格式不符则拒绝并写明理由。需配置 LLM。失败时跳过自动审批留给管理员",
+    "hint": "开启后，加群申请由 LLM 自动检测验证信息：同时包含昵称和OID(UID)则同意入群，并将群名片自动改为『QQ昵称_OID』；校验不过则跳过自动审批，留给管理员手动处理。需配置 LLM。失败时跳过自动审批留给管理员",
     "default": false
   },
   "join_welcome_msg": {

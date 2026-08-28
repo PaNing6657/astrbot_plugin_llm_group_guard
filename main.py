@@ -501,7 +501,11 @@ class LLMGroupGuardPlugin(Star):
             if has_nickname and oid_valid:
                 await self._approve_join(event, group_id, user_id, flag, oid)
             else:
-                await self._reject_join(event, group_id, user_id, flag, has_nickname, oid_valid)
+                # 校验不过：不拒绝也不同意，跳过自动审批，留给管理员手动处理
+                logger.info(
+                    f"[Guard] 入群申请校验未通过，跳过自动审批: 群 {group_id} 用户 {user_id} "
+                    f"(has_nickname={has_nickname}, oid_valid={oid_valid})"
+                )
         except Exception as e:
             logger.error(f"[Guard] 入群申请自动审批异常: {e}")
 
@@ -577,22 +581,6 @@ class LLMGroupGuardPlugin(Star):
         for k, v in vars_map.items():
             text = text.replace(k, str(v))
         return text.replace("{at_user}", f"[CQ:at,qq={user_id}]")
-
-    async def _reject_join(self, event, group_id, user_id, flag, has_nickname, oid_valid) -> None:
-        """拒绝入群，理由控制在 15 字以内。"""
-        missing = []
-        if not has_nickname:
-            missing.append("昵称")
-        if not oid_valid:
-            missing.append("OID")
-        reason = f"缺少{'与'.join(missing)}，请补充后重试" if missing else "入群申请信息不符合要求"
-        try:
-            await event.bot.api.call_action(
-                "set_group_add_request", flag=flag, sub_type="add", approve=False, reason=reason
-            )
-            logger.info(f"[Guard] 群 {group_id} 已拒绝用户 {user_id} 入群: {reason}")
-        except Exception as e:
-            logger.error(f"[Guard] 拒绝入群失败: 群 {group_id} 用户 {user_id}: {e}")
 
     # ------------------------------------------------------------------
     # 群消息监听：更新 bot 缓存 + @禁言指令 + LLM 违规审核
