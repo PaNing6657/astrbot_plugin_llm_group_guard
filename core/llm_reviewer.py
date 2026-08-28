@@ -237,7 +237,7 @@ class LLMReviewer:
 
         失败返回 None（如 LLM 未配置或请求失败），由调用方保守处理。
         """
-        if not comment.strip():
+        if not str(comment or "").strip():
             return {
                 "has_nickname": False,
                 "has_oid": False,
@@ -245,20 +245,31 @@ class LLMReviewer:
                 "oid": "",
                 "comment": "申请信息为空",
             }
-        prompt = (
-            "你是入群申请审核助手。请检查申请人填写的入群验证信息："
-            "它必须同时包含【昵称】和【OID】（也称 UID，是一串纯数字编号，如 QQ 号、学号等，不含字母）。"
-            "信息模糊、可读性差或格式不符合要求时倾向保守判断。"
-        )
-        system = f"{prompt}\n{_JOIN_JSON_RULE}"
-        user = f"入群验证信息内容：\n{comment[:500]}"
+        system, user = build_join_prompt(comment)
         result = await self._chat(system, user)
         if result is None:
             return None
-        return {
-            "has_nickname": bool(result.get("has_nickname")),
-            "has_oid": bool(result.get("has_oid")),
-            "nickname": str(result.get("nickname") or "").strip(),
-            "oid": str(result.get("oid") or "").strip(),
-            "comment": str(result.get("comment") or "").strip(),
-        }
+        return normalize_join_verdict(result)
+
+
+def build_join_prompt(comment: str) -> tuple[str, str]:
+    """构造入群申请的 (system, user) 提示词，供各途径统一复用。"""
+    prompt = (
+        "你是入群申请审核助手。请检查申请人填写的入群验证信息："
+        "它必须同时包含【昵称】和【OID】（也称 UID，是一串纯数字编号，如 QQ 号、学号等，不含字母）。"
+        "信息模糊、可读性差或格式不符合要求时倾向保守判断。"
+    )
+    system = f"{prompt}\n{_JOIN_JSON_RULE}"
+    user = f"入群验证信息内容：\n{str(comment or '')[:500]}"
+    return system, user
+
+
+def normalize_join_verdict(result: dict) -> dict:
+    """把模型原始输出规范化为入群判定结构。"""
+    return {
+        "has_nickname": bool(result.get("has_nickname")),
+        "has_oid": bool(result.get("has_oid")),
+        "nickname": str(result.get("nickname") or "").strip(),
+        "oid": str(result.get("oid") or "").strip(),
+        "comment": str(result.get("comment") or "").strip(),
+    }

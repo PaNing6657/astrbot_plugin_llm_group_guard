@@ -111,6 +111,26 @@
           <div class="toggle" id="joinVerifyToggle" data-key="join_verify_enable"></div>
         </div>
 
+        <div class="toggle-row" style="margin-bottom: 14px;">
+          <div>
+            <div class="t-label">审批使用 AstrBot 已配置模型</div>
+            <div class="t-hint">开启后从下方选择 provider 与模型，关闭则用插件自带 LLM 配置</div>
+          </div>
+          <div class="toggle" id="joinLlmUseAstrbot" data-key="join_llm_use_astrbot"></div>
+        </div>
+
+        <div class="llm-pick" id="llmPick">
+          <div class="field">
+            <label>Provider</label>
+            <select id="joinLlmProvider"></select>
+          </div>
+          <div class="field">
+            <label>模型</label>
+            <select id="joinLlmModel"></select>
+          </div>
+          <p class="hint" id="llmPickHint">从 AstrBot 已配置的模型中自动获取列表；若为空，请检查 AstrBot 是否已配置模型</p>
+        </div>
+
         <div class="field" style="margin-top: 16px;">
           <label>进群欢迎消息</label>
           <textarea id="joinWelcome" placeholder="例如：欢迎 {at_user} 加入本群！OID：{oid}"></textarea>
