@@ -5,7 +5,6 @@ from typing import Optional
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
-from astrbot.api.message_components import At, Plain
 from astrbot.api.star import Context, Star, register
 from astrbot.api.web import error_response, json_response, request
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
@@ -572,18 +571,12 @@ class LLMGroupGuardPlugin(Star):
                     logger.warning(f"[Guard] 改名提示发送失败: 群 {group_id} 用户 {user_id}: {e}")
 
     @staticmethod
-    def _build_text_with_at(template: str, vars_map: dict, user_id: str) -> list:
-        """把模板编译为消息段：{at_user} 替换成 @ 该用户，vars_map 做普通占位符替换。"""
-        pieces = str(template).split("{at_user}")
-        components = []
-        for i, piece in enumerate(pieces):
-            if piece:
-                for k, v in vars_map.items():
-                    piece = piece.replace(k, str(v))
-                components.append(Plain(piece))
-            if i < len(pieces) - 1:
-                components.append(At(qq=user_id))
-        return components
+    def _build_text_with_at(template: str, vars_map: dict, user_id: str) -> str:
+        """把模板编译为文本：{at_user} 替换成 CQ 码 @ 该用户（可多次出现）。"""
+        text = str(template)
+        for k, v in vars_map.items():
+            text = text.replace(k, str(v))
+        return text.replace("{at_user}", f"[CQ:at,qq={user_id}]")
 
     async def _reject_join(self, event, group_id, user_id, flag, has_nickname, oid_valid) -> None:
         """拒绝入群，理由控制在 15 字以内。"""
