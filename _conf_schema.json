@@ -129,6 +129,12 @@
     "hint": "审批通过者进群后发送到群里的欢迎语，支持占位符 {at_user}(@该用户)、{nickname}(QQ昵称)、{oid}(OID)、{user_id}(QQ号)；留空不发送",
     "default": "欢迎 {nickname} 加入本群！OID：{oid}"
   },
+  "join_welcome_other_msg": {
+    "type": "string",
+    "description": "非LLM审批进群欢迎消息",
+    "hint": "未经插件 LLM 审批进群（如管理员手动通过、未识别出OID）的成员，进群时发送的欢迎语；支持 {at_user}、{nickname}、{user_id}（无OID占位符）；留空不发送",
+    "default": "欢迎 {at_user} 加入本群！若需登记OID请联系管理员"
+  },
   "join_card_notify": {
     "type": "bool",
     "description": "修改昵称后发送提示",

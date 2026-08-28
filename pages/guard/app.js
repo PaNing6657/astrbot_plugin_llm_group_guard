@@ -327,6 +327,7 @@ async function loadJoin() {
   bindToggle($("joinVerifyToggle"), data.join_verify_enable);
   bindToggle($("joinCardNotifyToggle"), data.join_card_notify);
   $("joinWelcome").value = data.join_welcome_msg || "";
+  $("joinWelcomeOther").value = data.join_welcome_other_msg || "";
   $("joinCardNotifyMsg").value = data.join_card_notify_msg || "";
 }
 $("saveJoin").addEventListener("click", async () => {
@@ -334,6 +335,7 @@ $("saveJoin").addEventListener("click", async () => {
   const payload = {
     join_verify_enable: $("joinVerifyToggle").classList.contains("on"),
     join_welcome_msg: $("joinWelcome").value,
+    join_welcome_other_msg: $("joinWelcomeOther").value,
     join_card_notify: $("joinCardNotifyToggle").classList.contains("on"),
     join_card_notify_msg: $("joinCardNotifyMsg").value,
   };
