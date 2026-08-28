@@ -14,12 +14,7 @@ from astrbot.core.star.star_tools import StarTools
 from .core.event_utils import unwrap_event
 from .core.permission_utils import check_group_and_permission
 from .core.whole_ban_scheduler import WholeBanScheduler, parse_schedule_times, weekly_window
-from .core.llm_reviewer import (
-    LLMReviewer,
-    build_join_prompt,
-    extract_json_object,
-    normalize_join_verdict,
-)
+from .core.llm_reviewer import LLMReviewer
 from .core.message_guard import MessageGuard
 
 PLUGIN_NAME = "astrbot_plugin_llm_group_guard"
@@ -108,7 +103,6 @@ class LLMGroupGuardPlugin(Star):
         self.context.register_web_api(f"{base}/schedules", self.web_schedules, ["GET"], "定时禁言任务列表")
         self.context.register_web_api(f"{base}/schedules/set", self.web_schedule_set, ["POST"], "设置某群定时禁言")
         self.context.register_web_api(f"{base}/schedules/delete", self.web_schedule_delete, ["POST"], "删除某群定时禁言")
-        self.context.register_web_api(f"{base}/astrbot-models", self.web_astrbot_models, ["GET"], "AstrBot 已配置模型列表")
 
     async def web_get_config(self):
         return json_response(dict(self.config))
@@ -235,108 +229,6 @@ class LLMGroupGuardPlugin(Star):
         if old.get("started"):
             await self._apply_scheduled(gid, old, enable=False)
         return json_response({"deleted": True})
-
-    async def web_astrbot_models(self):
-        """返回 AstrBot 中已配置的模型列表 [{provider, model, label}]，供前端下拉选择。"""
-        return json_response(self._list_astrbot_models())
-
-    def _iter_astrbot_providers(self) -> list:
-        """从 AstrBot 平台管理器获取已配置的 provider 实例列表。"""
-        pm = getattr(self.context, "provider_manager", None)
-        if pm is None:
-            return []
-        if hasattr(pm, "get_insts"):
-            try:
-                return pm.get_insts() or []
-            except Exception as e:
-                logger.debug(f"[Guard] 读取 provider 实例失败: {e}")
-        return getattr(pm, "provider_insts", []) or []
-
-    @staticmethod
-    def _provider_name(inst) -> str:
-        meta = getattr(inst, "meta", None)
-        try:
-            return meta().provider_name if callable(meta) else str(getattr(inst, "provider_name", "") or "")
-        except Exception:
-            return ""
-
-    def _list_astrbot_models(self) -> list:
-        """枚举各 provider 的模型：返回 [{provider, model, label}]。"""
-        out: list = []
-        for inst in self._iter_astrbot_providers():
-            pname = self._provider_name(inst)
-            if not pname:
-                continue
-            raw = getattr(inst, "model_list", None)
-            if raw is None:
-                getter = getattr(inst, "get_model_list", None)
-                if callable(getter):
-                    try:
-                        raw = getter()
-                    except Exception as e:
-                        logger.debug(f"[Guard] 读取 {pname} 模型列表失败: {e}")
-                        raw = None
-            if isinstance(raw, dict):
-                items = raw.items()
-            elif isinstance(raw, list):
-                items = raw
-            elif isinstance(raw, str):
-                items = [raw]
-            else:
-                items = []
-            seen = set()
-            for key, val in (items if isinstance(raw, dict) else enumerate(items)):
-                if isinstance(val, dict):
-                    mid = str(val.get("id") or key or "")
-                    label = str(val.get("name") or mid or "")
-                else:
-                    mid = str(val or key or "")
-                    label = mid
-                if mid and mid not in seen:
-                    seen.add(mid)
-                    out.append({"provider": pname, "model": mid, "label": f"{pname} · {label}"})
-        return out
-
-    async def _judge_join(self, comment: str):
-        """入群检测：按配置用 AstrBot 已配置模型或插件自带 LLM。"""
-        if self.config.get("join_llm_use_astrbot"):
-            provider = str(self.config.get("join_llm_provider") or "").strip()
-            model = str(self.config.get("join_llm_model") or "").strip()
-            if provider and model:
-                text = await self._astrbot_llm_chat(provider, model, comment)
-                if text is None:
-                    self.reviewer.last_error = "AstrBot 已配置模型调用失败"
-                    return None
-                result = extract_json_object(text)
-                if result is None:
-                    self.reviewer.last_error = f"AstrBot 模型输出无法解析: {text[:120]}"
-                    return None
-                return normalize_join_verdict(result)
-            # 配置了使用但未选模型：回退到插件自带 LLM
-            logger.warning("[Guard] 已开启使用 AstrBot 模型但未选择模型，回退到插件自带 LLM")
-        return await self.reviewer.judge_join_request(comment)
-
-    async def _astrbot_llm_chat(self, provider_name: str, model_id: str, comment: str) -> Optional[str]:
-        """通过 AstrBot 已配置的 provider/模型发起入群审核请求，返回模型文本。"""
-        try:
-            target = None
-            for inst in self._iter_astrbot_providers():
-                if self._provider_name(inst) == provider_name:
-                    target = inst
-                    break
-            if target is None:
-                logger.error(f"[Guard] 未在 AstrBot 中找到 provider: {provider_name}")
-                return None
-            system, user = build_join_prompt(comment)
-            resp = await target.text_chat(f"{system}\n\n{user}", llm_model=model_id or None)
-            text = str(getattr(resp, "completion_text", "") or "").strip()
-            if not text:
-                logger.warning(f"[Guard] AstrBot 模型 {provider_name}:{model_id} 返回空内容")
-                return None
-            return text
-        except Exception as e:
-            logger.error(f"[Guard] 调用 AstrBot 模型失败 {provider_name}:{model_id}: {e}")
-            return None
 
     # 权限开关每次实时读取配置，避免修改配置后需要重启插件才生效
     def _permission_verification(self) -> bool:
@@ -540,7 +432,7 @@ class LLMGroupGuardPlugin(Star):
                 return
 
             logger.info(f"[Guard] 收到入群申请: 群 {group_id} 用户 {user_id} 申请信息={comment!r}")
-            verdict = await self._judge_join(comment)
+            verdict = await self.reviewer.judge_join_request(comment)
             if verdict is None:
                 # LLM 不可用/失败：不自动审批，留给管理员手动处理
                 logger.warning(

@@ -322,64 +322,17 @@ function toggleHandler(e) {
   e.currentTarget.classList.toggle("on");
 }
 
-let astrbotModels = []; // 后端枚举的 AstrBot 已配置模型 [{provider, model, label}]
-
 async function loadJoin() {
   const data = await api("config");
   bindToggle($("joinVerifyToggle"), data.join_verify_enable);
-  bindToggle($("joinLlmUseAstrbot"), data.join_llm_use_astrbot);
   bindToggle($("joinCardNotifyToggle"), data.join_card_notify);
   $("joinWelcome").value = data.join_welcome_msg || "";
   $("joinCardNotifyMsg").value = data.join_card_notify_msg || "";
-  // 拉取模型列表并回填已选项
-  try {
-    astrbotModels = (await api("astrbot-models")) || [];
-    $("llmPickHint").textContent = astrbotModels.length
-      ? "下拉选择后保存生效"
-      : "未获取到 AstrBot 已配置模型，请先在此页/后台配置模型，或关闭上方开关改用插件自带 LLM";
-  } catch (e) {
-    astrbotModels = [];
-    $("llmPickHint").textContent = "获取模型列表失败：" + e;
-  }
-  $("joinLlmProvider").innerHTML = "";
-  $("joinLlmModel").innerHTML = "";
-  const providers = [...new Set(astrbotModels.map((m) => m.provider))];
-  providers.forEach((p) => {
-    const opt = document.createElement("option");
-    opt.value = p;
-    opt.textContent = p;
-    if (p === data.join_llm_provider) opt.selected = true;
-    $("joinLlmProvider").appendChild(opt);
-  });
-  renderJoinModels(data.join_llm_provider, data.join_llm_model);
 }
-
-function renderJoinModels(selProvider, selModel) {
-  // 按所选 provider 过滤模型下拉；selModel 指定选中项（无匹配则不预选）
-  const list = $("joinLlmModel");
-  const provider = selProvider || $("joinLlmProvider").value;
-  list.innerHTML = "";
-  astrbotModels.filter((m) => m.provider === provider).forEach((m) => {
-    const opt = document.createElement("option");
-    opt.value = m.model;
-    opt.textContent = m.label;
-    if (selModel && m.model === selModel) opt.selected = true;
-    list.appendChild(opt);
-  });
-}
-
-$("joinLlmProvider").addEventListener("change", () => {
-  // 切换 provider 后重填模型下拉
-  renderJoinModels(null, "");
-});
-
 $("saveJoin").addEventListener("click", async () => {
   // config/update 只更新提交的字段，未提交项保持不变，无需回填
   const payload = {
     join_verify_enable: $("joinVerifyToggle").classList.contains("on"),
-    join_llm_use_astrbot: $("joinLlmUseAstrbot").classList.contains("on"),
-    join_llm_provider: $("joinLlmProvider").value,
-    join_llm_model: $("joinLlmModel").value,
     join_welcome_msg: $("joinWelcome").value,
     join_card_notify: $("joinCardNotifyToggle").classList.contains("on"),
     join_card_notify_msg: $("joinCardNotifyMsg").value,
