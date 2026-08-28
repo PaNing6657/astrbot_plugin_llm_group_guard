@@ -112,15 +112,15 @@
         </div>
 
         <div class="field" style="margin-top: 16px;">
-          <label>进群欢迎消息（LLM 审批通过者）</label>
+          <label>审批通过进群欢迎词</label>
           <textarea id="joinWelcome" placeholder="例如：欢迎 {at_user} 加入本群！OID：{oid}"></textarea>
-          <p class="hint">审批通过进群后发送到群里的欢迎语，支持 {at_user}(@该用户) {nickname} {oid} {user_id}，留空不发送</p>
+          <p class="hint">本插件审批通过者进群后发送，支持 {at_user}(@该用户) {nickname} {oid} {user_id}，留空不发送；此类进群会修改名片</p>
         </div>
 
         <div class="field" style="margin-top: 16px;">
-          <label>非 LLM 审批进群欢迎（未识别 OID）</label>
-          <textarea id="joinWelcomeOther" placeholder="例如：欢迎 {at_user} 加入本群！若需登记OID请联系管理员"></textarea>
-          <p class="hint">未经插件 LLM 审批进群（如管理员手动通过）的成员，进群时发送；支持 {at_user} {nickname} {user_id}，留空不发送</p>
+          <label>非审批进群欢迎词</label>
+          <textarea id="joinWelcomeDefault" placeholder="例如：欢迎 {at_user} 加入本群"></textarea>
+          <p class="hint">非审批进群（管理员手动批准、直接进群等）时发送，支持 {at_user} {nickname} {user_id}，留空不发送；此类进群不修改名片</p>
         </div>
 
         <div class="toggle-row" style="margin: 16px 0 14px;">

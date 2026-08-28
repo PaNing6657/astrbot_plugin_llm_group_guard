@@ -84,12 +84,10 @@ class LLMGroupGuardPlugin(Star):
         # LLM 审核器与消息守卫
         self.reviewer = LLMReviewer(config)
         self.guard = MessageGuard(config, self.reviewer, data_dir=str(self.data_dir))
-        # 记录插件 LLM 审批通过的 (群, 用户)，用于区分进群欢迎词
-        self._auto_approved: set[tuple[str, str]] = set()
-        # 缓存最近入群申请信息 (群, 用户) -> 申请内容，供非LLM审批进群时识别OID
-        self._join_comments: dict[tuple[str, str], str] = {}
         # 群内最近一次缓存的 bot 客户端，供定时任务在无事件上下文时使用
         self._group_runtime: dict[str, dict] = {}
+        # 审批通过者的 OID 缓存 {gid: {uid: oid}}，供成员进群事件发送欢迎时使用
+        self._join_oid: dict[str, dict[str, str]] = {}
         # 平台级 bot 客户端兜底：插件重启后即使群里无新消息也能执行定时任务
         self._platform_bot = None
         self._scheduler_task: Optional[asyncio.Task] = None
@@ -404,76 +402,53 @@ class LLMGroupGuardPlugin(Star):
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_group_increase(self, event: AstrMessageEvent):
-        """成员入群通知：非 LLM 审批进群者发送另一个欢迎词。"""
+        """成员进群事件：审批通过者发审批欢迎词并改名片；其他进群发默认欢迎词、不改名片。"""
         try:
             raw = getattr(event.message_obj, "raw_message", None)
             if not isinstance(raw, dict):
                 return
-            # 只处理成员入群通知（notice/group_increase）
+            # 只处理成员进群通知（notice/group_increase）
             if raw.get("post_type") != "notice" or raw.get("notice_type") != "group_increase":
                 return
             group_id = str(raw.get("group_id") or "")
             user_id = str(raw.get("user_id") or "")
-            if not group_id or not user_id:
-                return
-            # LLM 审批通过者：由审批流程发送正式欢迎，此处跳过
-            key = (group_id, user_id)
-            if key in self._auto_approved:
-                self._auto_approved.discard(key)
-                self._join_comments.pop(key, None)
-                return
-            # 套用群白名单
-            group_whitelist = [
-                str(g).strip()
-                for g in (self.config.get("group_whitelist") or [])
-                if str(g).strip()
-            ]
-            if group_whitelist and group_id not in group_whitelist:
-                return
+            if not group_id or not user_id or user_id == str(raw.get("operator_id") or ""):
+                return  # 无群/无用户，或为机器人自身进群时跳过
 
-            # 非LLM审批进群：先尝试从缓存的申请信息中识别 OID
-            comment = self._join_comments.pop(key, "")
-            if comment:
-                verdict = await self.reviewer.judge_join_request(comment)
-                oid = str(verdict.get("oid") or "").strip() if verdict else ""
-                if (
-                    verdict is not None
-                    and bool(verdict.get("has_nickname"))
-                    and oid.isdigit()
-                    and len(oid) >= 4
-                ):
-                    logger.info(f"[Guard] 群 {group_id} 非LLM审批进群者 {user_id} 识别到OID={oid}，按正式流程处理")
-                    # 识别到 OID：发正式欢迎 + 改名片 + 改名提示（与 LLM 审批一致）
-                    asyncio.create_task(self._set_card_after_join(event.bot, group_id, user_id, oid))
-                    return
+            # 审批通过者在 _approve_join 时记录了 OID 缓存；据此区分审批/非审批
+            cache_oid = (self._join_oid.get(group_id) or {}).get(user_id)
+            approved = bool(cache_oid)
+            oid = ""
+            if approved:
+                oid = str(cache_oid)
+                self._join_oid[group_id].pop(user_id, None)  # 欢迎已用，清理缓存
+                template = str(self.config.get("join_welcome_msg") or "").strip()
+            else:
+                template = str(self.config.get("join_welcome_default") or "").strip()
+            if not template:
+                return  # 对应欢迎词未配置则不发送
 
-            welcome = str(self.config.get("join_welcome_other_msg") or "").strip()
-            if not welcome:
-                return
-            # 取 QQ 昵称用于占位符
             nickname = user_id
             try:
                 info = await event.bot.get_group_member_info(
                     group_id=int(group_id), user_id=int(user_id)
                 )
                 if isinstance(info, dict):
-                    nickname = str(info.get("nickname") or user_id).strip() or user_id
+                    nickname = str(info.get("nickname") or user_id).strip()
             except Exception as e:
-                logger.debug(f"[Guard] 获取进群者昵称失败: {e}")
-            try:
-                await event.bot.send_group_msg(
-                    group_id=int(group_id),
-                    message=self._build_text_with_at(
-                        welcome,
-                        {"{nickname}": nickname, "{user_id}": user_id},
-                        user_id,
-                    ),
-                )
-                logger.info(f"[Guard] 群 {group_id} 向非LLM审批进群者 {user_id} 发送欢迎")
-            except Exception as e:
-                logger.warning(f"[Guard] 非LLM审批进群欢迎发送失败: 群 {group_id} 用户 {user_id}: {e}")
+                logger.debug(f"[Guard] 进群查询成员信息失败: {e}")
+
+            await event.bot.send_group_msg(
+                group_id=int(group_id),
+                message=self._build_text_with_at(
+                    template,
+                    {"{nickname}": nickname, "{oid}": oid, "{user_id}": user_id},
+                    user_id,
+                ),
+            )
+            logger.info(f"[Guard] 群 {group_id} 成员 {user_id} 进群，已发送{'审批' if approved else '普通'}欢迎")
         except Exception as e:
-            logger.error(f"[Guard] 非LLM审批进群欢迎异常: {e}")
+            logger.error(f"[Guard] 进群欢迎处理异常: {e}")
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.ALL)
@@ -490,6 +465,8 @@ class LLMGroupGuardPlugin(Star):
                 or raw.get("sub_type") != "add"
             ):
                 return
+            if not self.config.get("join_verify_enable"):
+                return  # 开关关闭则不自动审批
 
             group_id = str(raw.get("group_id") or "")
             user_id = str(raw.get("user_id") or "")
@@ -498,15 +475,14 @@ class LLMGroupGuardPlugin(Star):
             if not group_id or not user_id or not flag:
                 return
 
-            # 缓存申请信息：供非LLM审批进群时识别 OID（限长防无限增长）
-            if group_id and user_id:
-                ckey = (group_id, user_id)
-                self._join_comments[ckey] = comment[:500]
-                if len(self._join_comments) > 200:
-                    self._join_comments.pop(next(iter(self._join_comments)))
-
-            if not self.config.get("join_verify_enable"):
-                return  # 开关关闭则不自动审批
+            # 套用群白名单：填写了白名单则只审批名单内的群
+            group_whitelist = [
+                str(g).strip()
+                for g in (self.config.get("group_whitelist") or [])
+                if str(g).strip()
+            ]
+            if group_whitelist and group_id not in group_whitelist:
+                return
 
             logger.info(f"[Guard] 收到入群申请: 群 {group_id} 用户 {user_id} 申请信息={comment!r}")
             verdict = await self.reviewer.judge_join_request(comment)
@@ -540,13 +516,13 @@ class LLMGroupGuardPlugin(Star):
         except Exception as e:
             logger.error(f"[Guard] 同意入群失败: 群 {group_id} 用户 {user_id}: {e}")
             return
-        # 标记为 LLM 审批通过：进群时发正式欢迎词，而非非LLM欢迎词
-        self._auto_approved.add((str(group_id), str(user_id)))
+        # 记录 OID 供进群欢迎使用（进群事件里取不到则回退到名片提取）
+        self._join_oid.setdefault(str(group_id), {})[str(user_id)] = oid
         # 用户进群后自动改名片为 QQ昵称_OID（对方需实际入群，延迟重试）
         asyncio.create_task(self._set_card_after_join(event.bot, group_id, user_id, oid))
 
     async def _set_card_after_join(self, bot, group_id, user_id, oid: str) -> None:
-        """入群后：发送欢迎、改名片为『QQ昵称_OID』、按配置发送改名提示。"""
+        """入群后：改名片为『QQ昵称_OID』、按配置发送改名提示（欢迎由进群事件统一发送）。"""
         card = None
         nickname = None
         for _ in range(6):
@@ -561,23 +537,8 @@ class LLMGroupGuardPlugin(Star):
             except Exception as e:
                 logger.debug(f"[Guard] 等待入群获取昵称失败: {e}")
         if not card:
-            logger.warning(f"[Guard] 群 {group_id} 用户 {user_id} 入群后未取到昵称，跳过欢迎与改名")
+            logger.warning(f"[Guard] 群 {group_id} 用户 {user_id} 入群后未取到昵称，跳过改名片")
             return
-
-        # 进群欢迎（自定义，支持 {at_user} 实现 @该用户）
-        welcome = str(self.config.get("join_welcome_msg") or "").strip()
-        if welcome:
-            try:
-                await bot.send_group_msg(
-                    group_id=int(group_id),
-                    message=self._build_text_with_at(
-                        welcome,
-                        {"{nickname}": nickname, "{oid}": oid, "{user_id}": user_id},
-                        user_id,
-                    ),
-                )
-            except Exception as e:
-                logger.warning(f"[Guard] 进群欢迎发送失败: 群 {group_id} 用户 {user_id}: {e}")
 
         # 改名片
         try:
