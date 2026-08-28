@@ -491,7 +491,11 @@ class LLMGroupGuardPlugin(Star):
             try:
                 await bot.send_group_msg(
                     group_id=int(group_id),
-                    message=self._build_join_welcome(welcome, nickname, oid, user_id),
+                    message=self._build_text_with_at(
+                        welcome,
+                        {"{nickname}": nickname, "{oid}": oid, "{user_id}": user_id},
+                        user_id,
+                    ),
                 )
             except Exception as e:
                 logger.warning(f"[Guard] 进群欢迎发送失败: 群 {group_id} 用户 {user_id}: {e}")
@@ -506,35 +510,37 @@ class LLMGroupGuardPlugin(Star):
             logger.warning(f"[Guard] 修改名片失败: 群 {group_id} 用户 {user_id}: {e}")
             return
 
-        # 改名后的提示（开关 + 自定义文案）
+        # 改名后的提示（开关 + 自定义文案，支持 {at_user}）
         if self.config.get("join_card_notify"):
             tip = str(self.config.get("join_card_notify_msg") or "").strip()
             if tip:
                 try:
                     await bot.send_group_msg(
                         group_id=int(group_id),
-                        message=tip.replace("{new_card}", card)
-                        .replace("{nickname}", nickname)
-                        .replace("{oid}", oid)
-                        .replace("{user_id}", user_id),
+                        message=self._build_text_with_at(
+                            tip,
+                            {
+                                "{new_card}": card,
+                                "{nickname}": nickname,
+                                "{oid}": oid,
+                                "{user_id}": user_id,
+                            },
+                            user_id,
+                        ),
                     )
                 except Exception as e:
                     logger.warning(f"[Guard] 改名提示发送失败: 群 {group_id} 用户 {user_id}: {e}")
 
     @staticmethod
-    def _build_join_welcome(template: str, nickname: str, oid: str, user_id: str) -> list:
-        """把欢迎模板编译为消息段：{at_user} 替换成 @ 该用户（可多次出现）。"""
-        pieces = template.split("{at_user}")
+    def _build_text_with_at(template: str, vars_map: dict, user_id: str) -> list:
+        """把模板编译为消息段：{at_user} 替换成 @ 该用户，vars_map 做普通占位符替换。"""
+        pieces = str(template).split("{at_user}")
         components = []
         for i, piece in enumerate(pieces):
             if piece:
-                components.append(
-                    Plain(
-                        piece.replace("{nickname}", nickname)
-                        .replace("{oid}", oid)
-                        .replace("{user_id}", user_id)
-                    )
-                )
+                for k, v in vars_map.items():
+                    piece = piece.replace(k, str(v))
+                components.append(Plain(piece))
             if i < len(pieces) - 1:
                 components.append(At(qq=user_id))
         return components

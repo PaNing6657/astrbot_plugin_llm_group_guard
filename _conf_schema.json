@@ -138,7 +138,7 @@
   "join_card_notify_msg": {
     "type": "string",
     "description": "修改昵称提示语",
-    "hint": "改名片后发送的提示，支持占位符 {new_card}(新名片)、{nickname}、{oid}、{user_id}；留空则不发送",
+    "hint": "改名片后发送的提示，支持占位符 {at_user}(@该用户)、{new_card}(新名片)、{nickname}、{oid}、{user_id}；留空则不发送",
     "default": "已自动将 {nickname} 的群名片修改为 {new_card}"
   },
   "keyword_list": {
