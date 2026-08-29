@@ -593,17 +593,16 @@ class LLMGroupGuardPlugin(Star):
         logger.debug(f"[Guard] 收到群消息监听事件: group={group_id} sender={event.get_sender_id()} text={event.message_str[:50]!r}")
         if group_id:
             self._group_runtime[str(group_id)] = {"bot": event.bot}
-        # AI 回复范围开关：仅群主/群管/机器人管理员发给 AI 的消息才回复
-        # 拦截只阻止 AI 会话处理，不中断本插件的审核/指令等功能
-        if self.config.get("ai_reply_only_manager"):
-            if not self._is_manager_like(event) and self._is_at_bot(event):
-                logger.info(
-                    f"[Guard] AI回复范围限制：拦截非管理成员 {event.get_sender_id()} 发给 AI 的消息"
-                )
-                try:
-                    event.stop_event()  # 阻止后续 AI 会话处理
-                except Exception as e:
-                    logger.debug(f"[Guard] stop_event 调用失败: {e}")
+        # AI 回复范围开关：非群主/群管/机器人管理员的消息不进入 AI 会话（含免@对话）
+        # 仅阻止 AI 会话处理，不影响本插件审核/指令等功能
+        if self.config.get("ai_reply_only_manager") and not self._is_manager_like(event):
+            logger.info(
+                f"[Guard] AI回复范围限制：忽略非管理成员 {event.get_sender_id()} 的消息（AI 不再回复）"
+            )
+            try:
+                event.stop_event()  # 阻止后续 AI 会话处理
+            except Exception as e:
+                logger.debug(f"[Guard] stop_event 调用失败: {e}")
         # 先尝试解析 "对@某人禁言10分钟" 类指令，命中则不再走违规审核
         if await self._try_member_ban_cmd(event):
             return
@@ -619,20 +618,6 @@ class LLMGroupGuardPlugin(Star):
             if role in ("owner", "admin"):
                 return True
         return False
-
-    def _is_at_bot(self, event) -> bool:
-        """判断消息是否 @ 了机器人（发给 AI 的消息）。"""
-        self_qq = ""
-        try:
-            self_qq = str(event.get_self_id())
-        except Exception:
-            pass
-        for qq, _ in self._extract_at_list(event):
-            if self_qq and qq == self_qq:
-                return True
-        # 兼容：aiocqhttp 事件内置 at bot 标记
-        at_bot = getattr(event, "is_at_bot", False)
-        return bool(at_bot() if callable(at_bot) else at_bot)
 
     # ------------------------------------------------------------------
     # @某人 禁言/解禁自然语言指令：对@XXX禁言10分钟 / 对@XXX解禁
