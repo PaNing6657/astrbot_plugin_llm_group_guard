@@ -153,6 +153,12 @@
     "hint": "开启后，只有群主、群管理员和 AstrBot 管理员发给 AI 的消息才回复，普通成员发给 AI 的消息将被忽略（不回复）；关闭则全员可对话。仅影响 AI 会话回复，不影响本插件的审核/禁言等功能",
     "default": false
   },
+  "ai_reply_whitelist": {
+    "type": "list",
+    "description": "仅回复管理员时仍回复的用户白名单",
+    "hint": "开启“AI 仅回复管理”后，白名单中的 QQ 号（可填多个）发给 AI 的消息依然会触发回复，其他非管理成员照常忽略",
+    "default": []
+  },
   "keyword_list": {
     "type": "list",
     "description": "违规关键词列表",

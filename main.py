@@ -596,12 +596,13 @@ class LLMGroupGuardPlugin(Star):
         logger.debug(f"[Guard] 收到群消息监听事件: group={group_id} sender={event.get_sender_id()} text={event.message_str[:50]!r}")
         if group_id:
             self._group_runtime[str(group_id)] = {"bot": event.bot}
-        # AI 回复范围开关：非群主/群管/机器人管理员的消息不进入 AI 会话（含免@对话）
+        # AI 回复范围开关：非群主/群管/机器人管理员且非白名单的消息不进入 AI 会话（含免@对话）
         # 仅阻止 AI 会话处理，不影响本插件审核/指令等功能
-        if self.config.get("ai_reply_only_manager") and not self._is_manager_like(event):
-            logger.info(
-                f"[Guard] AI回复范围限制：忽略非管理成员 {event.get_sender_id()} 的消息（AI 不再回复）"
-            )
+        if (
+            self.config.get("ai_reply_only_manager")
+            and not self._is_manager_like(event)
+            and not self._in_ai_reply_whitelist(event)
+        ):
             try:
                 event.stop_event()  # 阻止后续 AI 会话处理
             except Exception as e:
@@ -621,6 +622,11 @@ class LLMGroupGuardPlugin(Star):
             if role in ("owner", "admin"):
                 return True
         return False
+
+    def _in_ai_reply_whitelist(self, event) -> bool:
+        """发送者是否在 AI 回复白名单（开启仅管理回复时白名单成员仍可触发 AI 回复）。"""
+        allow_list = self.config.get("ai_reply_whitelist") or []
+        return str(event.get_sender_id()) in {str(x).strip() for x in allow_list}
 
     # ------------------------------------------------------------------
     # @某人 禁言/解禁自然语言指令：对@XXX禁言10分钟 / 对@XXX解禁
