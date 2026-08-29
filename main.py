@@ -443,6 +443,9 @@ class LLMGroupGuardPlugin(Star):
                 ),
             )
             logger.info(f"[Guard] 群 {group_id} 成员 {user_id} 进群，已发送欢迎")
+            # 非 AI 审批路径（无 OID 缓存，如 LLM 未识别 OID 但人工审核通过）：名片无法按 _OID 修改，发失败提示
+            if not cache_oid:
+                await self._send_card_notify(event.bot, group_id, user_id, nickname, "", ok=False)
         except Exception as e:
             logger.error(f"[Guard] 进群欢迎处理异常: {e}")
 
