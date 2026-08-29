@@ -125,15 +125,9 @@
   },
   "join_welcome_msg": {
     "type": "string",
-    "description": "审批通过进群欢迎词",
-    "hint": "经本插件审批通过者进群后发送到群里的欢迎语，支持占位符 {at_user}(@该用户)、{nickname}(QQ昵称)、{oid}(OID)、{user_id}(QQ号)；留空不发送。此类进群会修改名片",
+    "description": "进群欢迎词",
+    "hint": "成员进群后发送到群里的欢迎语，支持占位符 {at_user}(@该用户)、{nickname}(QQ昵称)、{oid}(OID，AI 审批通过时才有)、{user_id}(QQ号)；留空不发送",
     "default": "欢迎 {nickname} 加入本群！OID：{oid}"
-  },
-  "join_welcome_default": {
-    "type": "string",
-    "description": "非审批进群欢迎词",
-    "hint": "非本插件审批的成员进群（管理员手动批准、直接进群等）时发送的欢迎语，支持 {at_user}、{nickname}、{user_id}；留空不发送。此类进群不修改名片",
-    "default": "欢迎 {nickname} 加入本群"
   },
   "join_card_notify": {
     "type": "bool",
@@ -143,9 +137,15 @@
   },
   "join_card_notify_msg": {
     "type": "string",
-    "description": "修改昵称提示语",
-    "hint": "改名片后发送的提示，支持占位符 {at_user}(@该用户)、{new_card}(新名片)、{nickname}、{oid}、{user_id}；留空则不发送",
+    "description": "修改昵称提示语（成功）",
+    "hint": "改名片成功后发送的提示，支持占位符 {at_user}(@该用户)、{new_card}(新名片)、{nickname}、{oid}、{user_id}；留空则不发送",
     "default": "已自动将 {nickname} 的群名片修改为 {new_card}"
+  },
+  "join_card_notify_fail_msg": {
+    "type": "string",
+    "description": "改名片失败提示语",
+    "hint": "改名片失败时（如权限不足、未取得昵称）发送的提示，支持 {at_user}、{nickname}、{oid}、{user_id}；留空则不发送。受“修改昵称后发送提示”开关控制",
+    "default": ""
   },
   "ai_reply_only_manager": {
     "type": "bool",

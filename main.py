@@ -401,7 +401,7 @@ class LLMGroupGuardPlugin(Star):
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_group_increase(self, event: AstrMessageEvent):
-        """成员进群事件：AI 放行者发审批欢迎词并改名片；其余（人工批/直接进群）发普通欢迎词，人工批也改名片。"""
+        """成员进群事件：统一发送欢迎词（AI 审批过的带 OID）；改名片仅审批流程执行。"""
         try:
             raw = getattr(event.message_obj, "raw_message", None)
             if not isinstance(raw, dict):
@@ -414,18 +414,15 @@ class LLMGroupGuardPlugin(Star):
             if not group_id or not user_id or user_id == str(raw.get("operator_id") or ""):
                 return  # 无群/无用户，或为机器人自身进群时跳过
 
-            # 有缓存说明 AI 识别到 OID 并走审批（含人工先批场景）：发普通欢迎词并改名片；否则发第二套欢迎词、不改名片
+            # 统一使用同一套欢迎词（join_welcome_msg）；有缓存（AI 走审批）则带上 OID
             cache_oid = (self._join_oid.get(group_id) or {}).get(user_id)
-            approved = bool(cache_oid)
             oid = ""
-            if approved:
+            if cache_oid:
                 oid = str(cache_oid)
                 self._join_oid[group_id].pop(user_id, None)  # 欢迎已用，清理缓存
-                template = str(self.config.get("join_welcome_msg") or "").strip()
-            else:
-                template = str(self.config.get("join_welcome_default") or "").strip()
+            template = str(self.config.get("join_welcome_msg") or "").strip()
             if not template:
-                return  # 对应欢迎词未配置则不发送
+                return  # 未配置欢迎词则不发送
 
             nickname = user_id
             try:
@@ -445,7 +442,7 @@ class LLMGroupGuardPlugin(Star):
                     user_id,
                 ),
             )
-            logger.info(f"[Guard] 群 {group_id} 成员 {user_id} 进群，已发送{'审批' if approved else '普通'}欢迎")
+            logger.info(f"[Guard] 群 {group_id} 成员 {user_id} 进群，已发送欢迎")
         except Exception as e:
             logger.error(f"[Guard] 进群欢迎处理异常: {e}")
 
@@ -525,7 +522,7 @@ class LLMGroupGuardPlugin(Star):
         asyncio.create_task(self._set_card_after_join(event.bot, group_id, user_id, oid))
 
     async def _set_card_after_join(self, bot, group_id, user_id, oid: str) -> None:
-        """入群后：改名片为『QQ昵称_OID』、按配置发送改名提示（欢迎由进群事件统一发送）。"""
+        """入群后：改名片为『QQ昵称_OID』，并按改名片成功与否发送对应改名提示。"""
         card = None
         nickname = None
         for _ in range(6):
@@ -540,7 +537,9 @@ class LLMGroupGuardPlugin(Star):
             except Exception as e:
                 logger.debug(f"[Guard] 等待入群获取昵称失败: {e}")
         if not card:
-            logger.warning(f"[Guard] 群 {group_id} 用户 {user_id} 入群后未取到昵称，跳过改名片")
+            # 未取到昵称 = 改名片失败
+            logger.warning(f"[Guard] 群 {group_id} 用户 {user_id} 入群后未取到昵称，改名片失败")
+            await self._send_card_notify(bot, group_id, user_id, nickname or user_id, oid, ok=False)
             return
 
         # 改名片
@@ -549,30 +548,31 @@ class LLMGroupGuardPlugin(Star):
                 "set_group_card", group_id=int(group_id), user_id=int(user_id), card=card
             )
             logger.info(f"[Guard] 群 {group_id} 已将用户 {user_id} 名片改为 {card}")
+            await self._send_card_notify(bot, group_id, user_id, nickname, oid, ok=True, card=card)
         except Exception as e:
             logger.warning(f"[Guard] 修改名片失败: 群 {group_id} 用户 {user_id}: {e}")
-            return
+            await self._send_card_notify(bot, group_id, user_id, nickname or user_id, oid, ok=False)
 
-        # 改名后的提示（开关 + 自定义文案，支持 {at_user}）
-        if self.config.get("join_card_notify"):
-            tip = str(self.config.get("join_card_notify_msg") or "").strip()
-            if tip:
-                try:
-                    await bot.send_group_msg(
-                        group_id=int(group_id),
-                        message=self._build_text_with_at(
-                            tip,
-                            {
-                                "{new_card}": card,
-                                "{nickname}": nickname,
-                                "{oid}": oid,
-                                "{user_id}": user_id,
-                            },
-                            user_id,
-                        ),
-                    )
-                except Exception as e:
-                    logger.warning(f"[Guard] 改名提示发送失败: 群 {group_id} 用户 {user_id}: {e}")
+    async def _send_card_notify(self, bot, group_id, user_id, nickname, oid: str, ok: bool, card: str = "") -> None:
+        """按改名片成功/失败分别发送对应提示语（受 join_card_notify 开关控制）。"""
+        if not self.config.get("join_card_notify"):
+            return
+        template = str(
+            (self.config.get("join_card_notify_msg") if ok else self.config.get("join_card_notify_fail_msg"))
+            or ""
+        ).strip()
+        if not template:
+            return  # 对应提示语未配置则不发送
+        vars_map = {"{nickname}": nickname, "{oid}": oid, "{user_id}": user_id}
+        if ok:
+            vars_map["{new_card}"] = card
+        try:
+            await bot.send_group_msg(
+                group_id=int(group_id),
+                message=self._build_text_with_at(template, vars_map, user_id),
+            )
+        except Exception as e:
+            logger.warning(f"[Guard] 改名提示发送失败: 群 {group_id} 用户 {user_id}: {e}")
 
     @staticmethod
     def _build_text_with_at(template: str, vars_map: dict, user_id: str) -> str:

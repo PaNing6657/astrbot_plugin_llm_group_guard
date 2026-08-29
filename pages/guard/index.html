@@ -112,15 +112,9 @@
         </div>
 
         <div class="field" style="margin-top: 16px;">
-          <label>审批通过进群欢迎词</label>
+          <label>进群欢迎词</label>
           <textarea id="joinWelcome" placeholder="例如：欢迎 {at_user} 加入本群！OID：{oid}"></textarea>
-          <p class="hint">本插件审批通过者进群后发送，支持 {at_user}(@该用户) {nickname} {oid} {user_id}，留空不发送；此类进群会修改名片</p>
-        </div>
-
-        <div class="field" style="margin-top: 16px;">
-          <label>非审批进群欢迎词</label>
-          <textarea id="joinWelcomeDefault" placeholder="例如：欢迎 {at_user} 加入本群"></textarea>
-          <p class="hint">非审批进群（管理员手动批准、直接进群等）时发送，支持 {at_user} {nickname} {user_id}，留空不发送；此类进群不修改名片</p>
+          <p class="hint">成员进群后发送，支持 {at_user}(@该用户) {nickname} {oid} {user_id}，留空不发送</p>
         </div>
 
         <div class="toggle-row" style="margin: 16px 0 14px;">
@@ -132,9 +126,15 @@
         </div>
 
         <div class="field">
-          <label>修改昵称提示语</label>
+          <label>修改昵称提示语（成功）</label>
           <textarea id="joinCardNotifyMsg" placeholder="例如：已自动将 {at_user} 的群名片修改为 {new_card}"></textarea>
-          <p class="hint">改名片后发送的提示，支持 {at_user}(@该用户) {new_card} {nickname} {oid} {user_id}，留空不发送</p>
+          <p class="hint">改名片成功后发送，支持 {at_user}(@该用户) {new_card} {nickname} {oid} {user_id}，留空不发送</p>
+        </div>
+
+        <div class="field" style="margin-top: 16px;">
+          <label>改名片失败提示语</label>
+          <textarea id="joinCardNotifyFailMsg" placeholder="例如：{at_user} 名片设置失败，请手动修改为 昵称_OID"></textarea>
+          <p class="hint">改名片失败时（权限不足、未取得昵称等）发送，支持 {at_user} {nickname} {oid} {user_id}，留空不发送</p>
         </div>
 
         <div class="actions">

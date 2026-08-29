@@ -328,17 +328,17 @@ async function loadJoin() {
   bindToggle($("joinVerifyToggle"), data.join_verify_enable);
   bindToggle($("joinCardNotifyToggle"), data.join_card_notify);
   $("joinWelcome").value = data.join_welcome_msg || "";
-  $("joinWelcomeDefault").value = data.join_welcome_default || "";
   $("joinCardNotifyMsg").value = data.join_card_notify_msg || "";
+  $("joinCardNotifyFailMsg").value = data.join_card_notify_fail_msg || "";
 }
 $("saveJoin").addEventListener("click", async () => {
   // config/update 只更新提交的字段，未提交项保持不变，无需回填
   const payload = {
     join_verify_enable: $("joinVerifyToggle").classList.contains("on"),
     join_welcome_msg: $("joinWelcome").value,
-    join_welcome_default: $("joinWelcomeDefault").value,
     join_card_notify: $("joinCardNotifyToggle").classList.contains("on"),
     join_card_notify_msg: $("joinCardNotifyMsg").value,
+    join_card_notify_fail_msg: $("joinCardNotifyFailMsg").value,
   };
   try {
     await api("config/save", "POST", payload);
