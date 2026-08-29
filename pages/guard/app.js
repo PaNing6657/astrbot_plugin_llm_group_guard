@@ -30,6 +30,7 @@ const CONFIG_FIELDS = [
   { key: "whole_ban_disable_msg", label: "解除禁言通知", type: "text", full: true },
   { key: "Permission_verification", label: "权限验证", type: "toggle", hint: "全体禁言等操作校验操作者权限" },
   { key: "allow_groupadmin_use", label: "允许群主/管理员使用", type: "toggle" },
+  { key: "ai_reply_only_manager", label: "AI 仅回复管理", type: "toggle", hint: "仅群主/群管/机器管理员的消息 AI 才回复" },
 ];
 
 // 兼容中英文逗号分割

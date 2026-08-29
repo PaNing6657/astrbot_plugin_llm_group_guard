@@ -147,6 +147,12 @@
     "hint": "改名片后发送的提示，支持占位符 {at_user}(@该用户)、{new_card}(新名片)、{nickname}、{oid}、{user_id}；留空则不发送",
     "default": "已自动将 {nickname} 的群名片修改为 {new_card}"
   },
+  "ai_reply_only_manager": {
+    "type": "bool",
+    "description": "AI 仅回复群主/群管/机器人管理员",
+    "hint": "开启后，只有群主、群管理员和 AstrBot 管理员发给 AI 的消息才回复，普通成员发给 AI 的消息将被忽略（不回复）；关闭则全员可对话。仅影响 AI 会话回复，不影响本插件的审核/禁言等功能",
+    "default": false
+  },
   "keyword_list": {
     "type": "list",
     "description": "违规关键词列表",
