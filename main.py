@@ -414,7 +414,7 @@ class LLMGroupGuardPlugin(Star):
             if not group_id or not user_id or user_id == str(raw.get("operator_id") or ""):
                 return  # 无群/无用户，或为机器人自身进群时跳过
 
-            # 统一使用同一套欢迎词（join_welcome_msg）；有缓存（AI 走审批）则带上 OID
+            # 统一使用同一套欢迎词（join_welcome_msg）；有 OID（AI 审批缓存或名片提取）则带上
             cache_oid = (self._join_oid.get(group_id) or {}).get(user_id)
             oid = ""
             if cache_oid:
@@ -431,6 +431,12 @@ class LLMGroupGuardPlugin(Star):
                 )
                 if isinstance(info, dict):
                     nickname = str(info.get("nickname") or user_id).strip()
+                    # 兜底：缓存未及时写入时，尝试从已有名片 昵称_OID 提取 OID
+                    if not oid:
+                        card = str(info.get("card") or "").strip()
+                        tail = card.rsplit("_", 1)[-1].strip() if "_" in card else ""
+                        if tail.isdigit():
+                            oid = tail
             except Exception as e:
                 logger.debug(f"[Guard] 进群查询成员信息失败: {e}")
 
@@ -443,8 +449,8 @@ class LLMGroupGuardPlugin(Star):
                 ),
             )
             logger.info(f"[Guard] 群 {group_id} 成员 {user_id} 进群，已发送欢迎")
-            # 非 AI 审批路径（无 OID 缓存，如 LLM 未识别 OID 但人工审核通过）：名片无法按 _OID 修改，发失败提示
-            if not cache_oid:
+            # 未拿到 OID（非 AI 审批路径，如 LLM 未识别 OID 但人工审核通过）：名片无法按 _OID 修改，发失败提示
+            if not oid:
                 await self._send_card_notify(event.bot, group_id, user_id, nickname, "", ok=False)
         except Exception as e:
             logger.error(f"[Guard] 进群欢迎处理异常: {e}")
@@ -511,6 +517,8 @@ class LLMGroupGuardPlugin(Star):
 
     async def _approve_join(self, event, group_id, user_id, flag, oid: str) -> None:
         """同意入群并记录 OID；即使 approve 未生效（如已被人工先批），仍按 AI 审批流程处理。"""
+        # 先写 OID 缓存再调用审批，避免进群通知先到导致欢迎漏带 OID（事件竞态）
+        self._join_oid.setdefault(str(group_id), {})[str(user_id)] = oid
         try:
             await event.bot.api.call_action(
                 "set_group_add_request", flag=flag, sub_type="add", approve=True, reason="已填写昵称与OID(UID)，审核通过"
@@ -519,8 +527,6 @@ class LLMGroupGuardPlugin(Star):
         except Exception as e:
             # 常见于已被人工先一步审批：不中断，仍发普通欢迎词并改名片
             logger.warning(f"[Guard] 同意入群失败（可能已被人工审批）: 群 {group_id} 用户 {user_id}: {e}")
-        # 记录 OID 供进群事件选欢迎词与改名片使用
-        self._join_oid.setdefault(str(group_id), {})[str(user_id)] = oid
         # 用户进群后自动改名片为 QQ昵称_OID（对方需实际入群，延迟重试）
         asyncio.create_task(self._set_card_after_join(event.bot, group_id, user_id, oid))
 
