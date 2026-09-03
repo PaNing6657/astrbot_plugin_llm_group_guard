@@ -978,7 +978,7 @@ class LLMGroupGuardPlugin(Star):
             operator_qq = str(event.get_sender_id())
 
             # 普通成员可禁言/解禁自己；禁言他人才需要管理权限
-            if target_qq != operator_qq and self._permission_verification():
+            if target_qq != operator_qq and self._permission_verification(group_id):
                 has_perm, error_msg = await check_group_and_permission(
                     event, self._allow_groupadmin_use(group_id), event.get_sender_name()
                 )
@@ -1097,7 +1097,7 @@ class LLMGroupGuardPlugin(Star):
                     return {"status": "error", "message": f"无法在群里找到昵称为「{user_id}」的成员，请改用其 QQ 号"}
 
             # 普通成员可禁言/解禁自己；操作他人才需要管理权限
-            if target_qq != operator_qq and self._permission_verification():
+            if target_qq != operator_qq and self._permission_verification(group_id):
                 has_perm, error_msg = await check_group_and_permission(
                     event, self._allow_groupadmin_use(group_id), operator_name
                 )
@@ -1142,7 +1142,7 @@ class LLMGroupGuardPlugin(Star):
             return event.plain_result("此操作仅可在群聊中进行")
         operator_name = event.get_sender_name()
 
-        if self._permission_verification():
+        if self._permission_verification(group_id):
             has_perm, error_msg = await check_group_and_permission(
                 event, self._allow_groupadmin_use(group_id), operator_name
             )
@@ -1172,7 +1172,7 @@ class LLMGroupGuardPlugin(Star):
             if not group_id:
                 return {"status": "error", "message": "此操作仅可在群聊中进行"}
 
-            if self._permission_verification():
+            if self._permission_verification(group_id):
                 has_perm, error_msg = await check_group_and_permission(
                     event, self._allow_groupadmin_use(group_id), operator_name
                 )
@@ -1213,7 +1213,7 @@ class LLMGroupGuardPlugin(Star):
             return event.plain_result("此操作仅可在群聊中进行")
         operator_name = event.get_sender_name()
 
-        if self._permission_verification():
+        if self._permission_verification(group_id):
             has_perm, error_msg = await check_group_and_permission(
                 event, self._allow_groupadmin_use(group_id), operator_name
             )
@@ -1419,7 +1419,7 @@ class LLMGroupGuardPlugin(Star):
             if not group_id:
                 return {"status": "error", "message": "此操作仅可在群聊中进行"}
 
-            if self._permission_verification():
+            if self._permission_verification(group_id):
                 has_perm, error_msg = await check_group_and_permission(
                     event, self._allow_groupadmin_use(group_id), operator_name
                 )
