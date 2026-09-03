@@ -57,10 +57,7 @@ DEFAULT_GROUP_CONFIG = {
 }
 CONFIG_FILE = "config.json"  # 插件配置本地持久化文件名
 
-# 旧版扁平配置迁移所需的键分类
-_LEGACY_GLOBAL_KEYS = {"llm_base_url", "llm_api_key", "llm_model",
-                       "llm_fallback_base_urls", "llm_fallback_api_keys", "llm_fallback_models",
-                       "llm_timeout", "llm_max_tokens"}
+# 旧版扁平配置迁移所需的键分类（自定义 LLM 键已废弃，不再迁移）
 _LEGACY_GROUP_KEYS = set(DEFAULT_GROUP_CONFIG) | {"group_whitelist"}
 _GLOBAL_CONFIG_KEYS = set(DEFAULT_GLOBAL_CONFIG)
 _GROUP_CONFIG_KEYS = set(DEFAULT_GROUP_CONFIG)
@@ -447,21 +444,47 @@ class LLMGroupGuardPlugin(Star):
             return error_response(f"获取群列表失败：{e}")
 
     async def web_providers(self):
-        """GET /{base}/providers：返回 AstrBot 已配置的聊天模型列表 [{id}]。"""
+        """GET /{base}/providers：返回 AstrBot 已配置的聊天模型列表 [{id,label}]（多途径兼容）。"""
+        raw = None
+        error = ""
+        # 途径1：context.get_all_providers()（provider 实体列表）
         try:
-            providers = getattr(self.context, "get_all_providers", lambda: [])()
+            fn = getattr(self.context, "get_all_providers", None)
+            if callable(fn):
+                raw = fn()
         except Exception as e:
-            logger.warning(f"[Guard] 获取 AstrBot providers 失败: {e}")
-            providers = []
-        out = []
-        for p in providers or []:
+            error = f"get_all_providers: {e}"
+        # 途径2：provider_manager 上的列表方法
+        if not raw:
             try:
-                pid = str(p.meta().id or "").strip()
+                pm = getattr(self.context, "provider_manager", None)
+                if pm is not None:
+                    fn2 = getattr(pm, "get_all_providers", None) or getattr(
+                        pm, "get_chat_providers", None
+                    )
+                    if callable(fn2):
+                        res = fn2()
+                        raw = await res if asyncio.iscoroutine(res) else res
+            except Exception as e:
+                error += f" | provider_manager: {e}"
+        out, seen = [], set()
+        for p in raw or []:
+            pid = ""
+            try:
+                if isinstance(p, dict):
+                    # 兼容配置记录 dict 形态
+                    pid = str(p.get("id") or p.get("provider_id") or "").strip()
+                else:
+                    meta = p.meta() if hasattr(p, "meta") else p
+                    pid = str(getattr(meta, "id", "") or "").strip()
             except Exception:
                 continue
-            if pid:
+            if pid and pid not in seen:
+                seen.add(pid)
                 out.append({"id": pid, "label": pid})
-        return json_response({"providers": out})
+        if not out and error:
+            logger.warning(f"[Guard] 获取 AstrBot 模型列表异常: {error}")
+        return json_response({"providers": out, "error": error or None})
 
     def _init_platform_bot(self):
         """从平台管理器获取 aiocqhttp 客户端，作为定时任务执行的全群兜底。"""

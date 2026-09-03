@@ -183,6 +183,9 @@ async function loadConfig() {
     ]);
     groupConfig = cfgData.group || {};
     astrbotProviders = (provData && provData.providers) || [];
+    if ((provData && provData.error) && !astrbotProviders.length) {
+      toast("configToast", "读取 AstrBot 模型列表异常：" + provData.error, true);
+    }
   } catch (e) {
     toast("configToast", "加载配置失败：" + e, true);
   }
