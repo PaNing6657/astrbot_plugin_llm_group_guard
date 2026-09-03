@@ -357,15 +357,15 @@ async function loadSchedules() {
   renderSchedules(await api("schedules"));
 }
 
-// 定时禁言表单默认作用于当前群
+// 定时禁言表单作用于当前选择的群
 $("setSchedule").addEventListener("click", async () => {
   const payload = {
-    group_id: $("sGroup").value.trim() || currentGroup,
+    group_id: currentGroup,
     mode: $("sMode").value,
     start_time: $("sStart").value.trim(),
     end_time: $("sEnd").value.trim(),
   };
-  if (!payload.group_id) return toast("scheduleToast", "请填写群号", true);
+  if (!payload.group_id) return toast("scheduleToast", "请先选择群", true);
   if (payload.mode === "weekly") {
     payload.weekdays = $("sWeekdays").value.trim();
     if (!payload.weekdays) return toast("scheduleToast", "请填写周几", true);
