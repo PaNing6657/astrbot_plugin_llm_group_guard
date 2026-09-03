@@ -15,7 +15,7 @@ const GROUP_FIELDS = [
   { key: "guard_recall_ban_threshold", label: "撤回 N 次自动禁言", type: "number", hint: "仅 recall 模式生效，0=关闭" },
   { key: "guard_interval", label: "审核间隔（秒）", type: "number", hint: "0=每条都审" },
   { key: "guard_risk_as_violation", label: "风控拦截视为违规", type: "toggle" },
-  { key: "guard_prompt", label: "审核要求（自定义）", type: "textarea", full: true, hint: "写清本群禁止内容，LLM 侧重审核" },
+  { key: "guard_prompt", label: "审核要求（自定义）", type: "textarea", full: true, hint: "完全自定义审核提示词（无内置话术），写清本群禁止内容；留空则仅保留 JSON 输出约束" },
   { key: "guard_notice", label: "违规通知消息", type: "text", full: true, hint: "支持 {user_id} {duration} {count} 占位符，留空不发送" },
   { key: "keyword_guard_enable", label: "关键词检测", type: "toggle", hint: "命中关键词即判违规，机制同 LLM 审核但独立计数" },
   { key: "keyword_list", label: "违规关键词（逗号分隔）", type: "csv", full: true, hint: "消息包含任一关键词即判违规" },

@@ -141,15 +141,15 @@ class LLMReviewer:
     ) -> Optional[dict]:
         """判定一条群消息是否违规。违规时 allowed 为 false。
 
-        prompt 为该群审核要求（guard_prompt，由调用方传入）；chat_id 为该群选用的
-        AstrBot 聊天模型，fallback_chat_id 为备用模型（主模型技术性失败时自动切换）。
-        当模型输出触发风控特征时，返回带 source="risk_block" 的疑似违规判定
-        （消息内容疑似敏感）；其余失败返回 None。
+        prompt 为该群自定义审核要求（guard_prompt，由调用方传入），完全由用户定义、
+        无内置默认话术；未填写时系统提示仅保留 JSON 输出格式约束。
+        chat_id 为该群选用的 AstrBot 聊天模型，fallback_chat_id 为备用模型
+        （主模型技术性失败时自动切换）。当模型输出触发风控特征时，返回带
+        source="risk_block" 的疑似违规判定（消息内容疑似敏感）；其余失败返回 None。
         """
         wanted = str(prompt or "").strip()
-        if not wanted:
-            wanted = "你是本群的 AI 管理员，请负责地判断群内消息是否存在违规行为。"
-        system = f"{wanted}\n{_JSON_RULE}"
+        # 不内置任何默认提示词：自定义要求非空时拼在格式约束前，为空则仅输出格式约束
+        system = f"{wanted}\n{_JSON_RULE}" if wanted else _JSON_RULE
         user = f"发言者：{sender}\n消息内容：{text[:2000]}"
         result = await self._ask(chat_id, fallback_chat_id, system, user)
         if result is None and self.last_error_type == "risk_block":
