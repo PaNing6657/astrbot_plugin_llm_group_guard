@@ -3,6 +3,7 @@ import json
 import os
 import re
 import time
+import traceback
 from typing import Optional
 
 from astrbot.api import AstrBotConfig, logger
@@ -159,7 +160,7 @@ class LLMGroupGuardPlugin(Star):
 
     async def web_get_config(self):
         # GET /config?group_id=X：返回全局配置 + 该群配置
-        gid = str(request.query_params.get("group_id") or "").strip()
+        gid = str(request.query.get("group_id") or "").strip()
         if not gid:
             return error_response("缺少 group_id 参数")
         return json_response({
