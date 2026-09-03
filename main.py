@@ -30,6 +30,7 @@ DEFAULT_GLOBAL_CONFIG = {}
 
 DEFAULT_GROUP_CONFIG = {
     "llm_chat": "",  # 本群审核使用的 AstrBot LLM 模型 ID（如 botcf/gpt-5.6-luna）
+    "llm_chat_fallback": "",  # 备用模型：主模型技术性失败时自动切换（内容风控不切换）
     "guard_enable": False,
     "guard_action": "ban",
     "guard_ban_seconds": "600",
@@ -733,7 +734,9 @@ class LLMGroupGuardPlugin(Star):
 
             logger.info(f"[Guard] 收到入群申请: 群 {group_id} 用户 {user_id} 申请信息={comment!r}")
             verdict = await self.reviewer.judge_join_request(
-                comment, chat_id=self._gconf(group_id).get("llm_chat")
+                comment,
+                chat_id=self._gconf(group_id).get("llm_chat"),
+                fallback_chat_id=self._gconf(group_id).get("llm_chat_fallback"),
             )
             if verdict is None:
                 # LLM 不可用/失败：不自动审批，留给管理员手动处理

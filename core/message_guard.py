@@ -133,6 +133,7 @@ class MessageGuard:
             user_id, text,
             prompt=gconf.get("guard_prompt") or "",
             chat_id=gconf.get("llm_chat") or "",
+            fallback_chat_id=gconf.get("llm_chat_fallback") or "",
         )
         if verdict is None:
             logger.warning(

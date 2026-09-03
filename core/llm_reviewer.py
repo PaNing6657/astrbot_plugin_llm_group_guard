@@ -72,8 +72,29 @@ class LLMReviewer:
     async def close(self) -> None:
         """无需自持连接，无需清理。"""
 
-    async def _ask(self, chat_id: str, system: str, user: str) -> Optional[dict]:
-        """调用 AstrBot 指定聊天模型并解析 JSON 结果。"""
+    async def _ask(
+        self, chat_id: str, fallback_chat_id: str, system: str, user: str
+    ) -> Optional[dict]:
+        """调用 AstrBot 指定聊天模型并解析 JSON 结果；主模型技术性失败时自动切到备用模型。"""
+        result = await self._ask_one(chat_id, system, user)
+        if result is not None:
+            return result
+        # 主模型失败：技术性故障切备用；内容风控（消息被判敏感）切换无意义，不切
+        fb = (fallback_chat_id or "").strip()
+        if fb and fb != chat_id and self.last_error_type != "risk_block":
+            prior = self.last_error
+            result = await self._ask_one(fb, system, user)
+            if result is not None:
+                logger.info(
+                    f"[LLMReviewer] 主模型 {chat_id} 失败，已切换到备用 {fb}: {prior}"
+                )
+                # 已成功，清空旧错误
+                self.last_error = ""
+                self.last_error_type = ""
+        return result
+
+    async def _ask_one(self, chat_id: str, system: str, user: str) -> Optional[dict]:
+        """对单个模型发起生成并解析 JSON 结果。"""
         if not chat_id:
             self.last_error = "本群未选择 LLM 模型（llm_chat 为空）"
             self.last_error_type = "request_fail"
@@ -111,20 +132,26 @@ class LLMReviewer:
         return result
 
     async def judge_message(
-        self, sender: str, text: str, prompt: str = "", chat_id: str = ""
+        self,
+        sender: str,
+        text: str,
+        prompt: str = "",
+        chat_id: str = "",
+        fallback_chat_id: str = "",
     ) -> Optional[dict]:
         """判定一条群消息是否违规。违规时 allowed 为 false。
 
         prompt 为该群审核要求（guard_prompt，由调用方传入）；chat_id 为该群选用的
-        AstrBot 聊天模型。当模型输出触发风控特征时，返回带 source="risk_block" 的
-        疑似违规判定（消息内容疑似敏感）；其余失败返回 None。
+        AstrBot 聊天模型，fallback_chat_id 为备用模型（主模型技术性失败时自动切换）。
+        当模型输出触发风控特征时，返回带 source="risk_block" 的疑似违规判定
+        （消息内容疑似敏感）；其余失败返回 None。
         """
         wanted = str(prompt or "").strip()
         if not wanted:
             wanted = "你是本群的 AI 管理员，请负责地判断群内消息是否存在违规行为。"
         system = f"{wanted}\n{_JSON_RULE}"
         user = f"发言者：{sender}\n消息内容：{text[:2000]}"
-        result = await self._ask(chat_id, system, user)
+        result = await self._ask(chat_id, fallback_chat_id, system, user)
         if result is None and self.last_error_type == "risk_block":
             return {
                 "allowed": False,
@@ -133,7 +160,9 @@ class LLMReviewer:
             }
         return result
 
-    async def judge_join_request(self, comment: str, chat_id: str = "") -> Optional[dict]:
+    async def judge_join_request(
+        self, comment: str, chat_id: str = "", fallback_chat_id: str = ""
+    ) -> Optional[dict]:
         """判定入群申请信息是否同时包含【昵称】与【OID/UID】，返回结构化结果。
 
         chat_id 为该群选用的 AstrBot 聊天模型；失败返回 None（如未配置模型或调用失败），
@@ -154,7 +183,7 @@ class LLMReviewer:
         )
         system = f"{prompt}\n{_JOIN_JSON_RULE}"
         user = f"入群验证信息内容：\n{comment[:500]}"
-        result = await self._ask(chat_id, system, user)
+        result = await self._ask(chat_id, fallback_chat_id, system, user)
         if result is None:
             return None
         return {
