@@ -150,10 +150,12 @@ def _migrate_providers_from_legacy(legacy: dict) -> list:
 
 @register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核", "v1.0.0")
 class LLMGroupGuardPlugin(Star):
-    def __init__(self, context: Context, config: AstrBotConfig):
+    def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
         self.data_dir = StarTools.get_data_dir()
-        self.config = config
+        # 无 _conf_schema.json 时 AstrBot 不注入 config，需自建空配置（持久化由本地 config.json 负责）
+        self.config = config if config is not None else AstrBotConfig()
+        config = self.config  # 后续统一使用局部变量，保持与旧代码一致
         # 无 _conf_schema.json 时 AstrBot 不再注入默认配置，这里初始化两级配置结构并加载本地持久化
         config.setdefault("global", {})
         config.setdefault("groups", {})
