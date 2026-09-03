@@ -471,6 +471,7 @@ class LLMGroupGuardPlugin(Star):
             except Exception as e:
                 error += f" | provider_manager: {e}"
         out = []
+        detail_parts = []
         for p in raw or []:
             pid = ""
             vision = False
@@ -488,19 +489,32 @@ class LLMGroupGuardPlugin(Star):
                 else:
                     try:
                         meta = p.meta() if hasattr(p, "meta") else p
-                        pid = str(getattr(meta, "id", "") or "").strip()
-                    except Exception:
+                        if isinstance(meta, dict):
+                            pid = str(meta.get("id") or "").strip()
+                        else:
+                            pid = str(getattr(meta, "id", "") or "").strip()
+                    except Exception as e:
+                        if len(detail_parts) < 5:
+                            detail_parts.append(f"provider[{type(p).__name__}] meta 解析失败: {e}")
                         continue
                     try:
                         # 识图能力探测失败不影响模型列出
                         vision = LLMReviewer.provider_supports_vision(p)
                     except Exception:
                         vision = False
-            except Exception:
+            except Exception as e:
+                if len(detail_parts) < 5:
+                    detail_parts.append(f"provider[{type(p).__name__}] 解析异常: {e}")
                 continue
             if pid and pid not in seen:
                 seen.add(pid)
                 out.append({"id": pid, "label": pid, "vision": vision})
+        if not out and raw:
+            detail = "；".join(detail_parts) or f"共 {len(raw)} 个条目，全部无有效 id（type={type(raw).__name__}）"
+            logger.warning(f"[Guard] AstrBot 模型列表全部解析失败: {detail}")
+            error = f"检测到 {len(raw)} 个模型条目但全部解析失败：{detail}"
+        elif not out and not raw:
+            error = "未检测到任何模型（AstrBot 中无已配置的聊天模型，或接口未返回）"
         if not out and error:
             logger.warning(f"[Guard] 获取 AstrBot 模型列表异常: {error}")
         return json_response({"providers": out, "error": error or None})

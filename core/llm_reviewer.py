@@ -81,7 +81,7 @@ class LLMReviewer:
         # 模态列表/字符串：包含 图片/image/vision 即视为支持识图
         modal_sources = []
         if meta is not None:
-            modal_sources.append(getattr(meta, "modalities", None))
+            modal_sources.append(meta.get("modalities") if isinstance(meta, dict) else getattr(meta, "modalities", None))
         cfg = getattr(provider, "config", None) or {}
         modal_sources.append(cfg.get("modalities", None))
         for source in modal_sources:
