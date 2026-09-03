@@ -23,15 +23,12 @@ CHECK_INTERVAL = 20  # 定时禁言调度循环检查间隔（秒）
 
 # 已移除 _conf_schema.json（不提供 AstrBot 自带设置页），
 # 配置默认值内聚于此，全部由插件 WebUI 页面管理。
-# 配置分为两级：global（LLM 服务池等账号级共享）+ groups（每群独立策略）
-DEFAULT_GLOBAL_CONFIG = {
-    "llm_providers": [],  # [{id,name,base_url,api_key,models:[...]}，WebUI 动态增删]
-    "llm_timeout": 30,
-    "llm_max_tokens": 2000,
-}
+# 配置分为两级：global（预留，当前为空）+ groups（每群独立策略）。
+# LLM 能力直接复用 AstrBot 已配置的 provider（群级 llm_chat 记录其 chat 模型 ID）。
+DEFAULT_GLOBAL_CONFIG = {}
 
 DEFAULT_GROUP_CONFIG = {
-    "llm_use": {"provider_id": "", "model": ""},  # 本群选用的 LLM 服务+模型
+    "llm_chat": "",  # 本群审核使用的 AstrBot LLM 模型 ID（如 botcf/gpt-5.6-luna）
     "guard_enable": False,
     "guard_action": "ban",
     "guard_ban_seconds": "600",
@@ -116,38 +113,6 @@ def _to_weekly_rule(start_ts: float, end_ts: float) -> dict:
     }
 
 
-def _migrate_providers_from_legacy(legacy: dict) -> list:
-    """旧扁平 llm_* 配置 → LLM 服务池 [{id,name,base_url,api_key,models}]。"""
-    providers = []
-    base = str(legacy.get("llm_base_url") or "").strip()
-    key = str(legacy.get("llm_api_key") or "").strip()
-    model = str(legacy.get("llm_model") or "").strip()
-    if base and key and model:
-        providers.append({
-            "id": "p1",
-            "name": "主模型",
-            "base_url": base,
-            "api_key": key,
-            "models": [model],
-        })
-    fb_base = legacy.get("llm_fallback_base_urls") or []
-    fb_key = legacy.get("llm_fallback_api_keys") or []
-    fb_model = legacy.get("llm_fallback_models") or []
-    for i in range(max(len(fb_base), len(fb_key), len(fb_model))):
-        b = str(fb_base[i]).strip() if i < len(fb_base) else ""
-        k = str(fb_key[i]).strip() if i < len(fb_key) else ""
-        m = str(fb_model[i]).strip() if i < len(fb_model) else ""
-        if b and k and m:
-            providers.append({
-                "id": f"p{i + 2}",
-                "name": f"备用{i + 1}",
-                "base_url": b,
-                "api_key": k,
-                "models": [m],
-            })
-    return providers
-
-
 @register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核", "v1.0.0")
 class LLMGroupGuardPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
@@ -186,6 +151,7 @@ class LLMGroupGuardPlugin(Star):
     def _register_web_apis(self):
         base = f"/{PLUGIN_NAME}"
         self.context.register_web_api(f"{base}/groups", self.web_group_list, ["GET"], "机器人为管理员的群列表")
+        self.context.register_web_api(f"{base}/providers", self.web_providers, ["GET"], "AstrBot 已配置的聊天模型列表")
         self.context.register_web_api(f"{base}/config", self.web_get_config, ["GET"], "读取插件配置")
         self.context.register_web_api(f"{base}/config/save", self.web_save_config, ["POST"], "保存插件配置")
         self.context.register_web_api(f"{base}/violations", self.web_violations, ["GET"], "违规记录列表")
@@ -266,13 +232,7 @@ class LLMGroupGuardPlugin(Star):
                         merged.update({k: v for k, v in gval.items() if k in _GROUP_CONFIG_KEYS})
                         groups[str(gid)] = merged
         else:
-            # 旧扁平结构：llm_* 组装为 providers 池，其余键作为群配置模板
-            providers = _migrate_providers_from_legacy(loaded)
-            if providers:
-                g["llm_providers"] = providers
-            for key in ("llm_timeout", "llm_max_tokens"):
-                if key in loaded:
-                    g[key] = loaded[key]
+            # 旧扁平结构：自定义 LLM 配置已废弃（改用 AstrBot provider），仅迁移群级策略键
             self._group_template = {
                 k: v for k, v in loaded.items()
                 if k in _LEGACY_GROUP_KEYS and k != "group_whitelist"
@@ -485,6 +445,23 @@ class LLMGroupGuardPlugin(Star):
         except Exception as e:
             logger.error(f"[Guard] 获取群列表失败: {e}")
             return error_response(f"获取群列表失败：{e}")
+
+    async def web_providers(self):
+        """GET /{base}/providers：返回 AstrBot 已配置的聊天模型列表 [{id}]。"""
+        try:
+            providers = getattr(self.context, "get_all_providers", lambda: [])()
+        except Exception as e:
+            logger.warning(f"[Guard] 获取 AstrBot providers 失败: {e}")
+            providers = []
+        out = []
+        for p in providers or []:
+            try:
+                pid = str(p.meta().id or "").strip()
+            except Exception:
+                continue
+            if pid:
+                out.append({"id": pid, "label": pid})
+        return json_response({"providers": out})
 
     def _init_platform_bot(self):
         """从平台管理器获取 aiocqhttp 客户端，作为定时任务执行的全群兜底。"""
@@ -732,7 +709,7 @@ class LLMGroupGuardPlugin(Star):
 
             logger.info(f"[Guard] 收到入群申请: 群 {group_id} 用户 {user_id} 申请信息={comment!r}")
             verdict = await self.reviewer.judge_join_request(
-                comment, model_sel=self._gconf(group_id).get("llm_use")
+                comment, chat_id=self._gconf(group_id).get("llm_chat")
             )
             if verdict is None:
                 # LLM 不可用/失败：不自动审批，留给管理员手动处理

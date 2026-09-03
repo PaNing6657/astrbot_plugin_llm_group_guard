@@ -1,16 +1,10 @@
-/* LLM 群守卫 WebUI：多群管理，进入先选群 */
+/* LLM 群守卫 WebUI：多群管理，进入先选群；LLM 复用 AstrBot 已配置模型 */
 const bridge = window.AstrBotPluginPage;
 const $ = (id) => document.getElementById(id);
 
-/* ---------- 全局(LLM 服务池之外的通用项)字段定义 ---------- */
-const GLOBAL_FIELDS = [
-  { key: "llm_timeout", label: "请求超时（秒）", type: "number" },
-  { key: "llm_max_tokens", label: "输出上限（token）", type: "number", hint: "思考型模型可调大" },
-];
-
 /* ---------- 本群字段定义 ---------- */
 const GROUP_FIELDS = [
-  { key: "llm_use", label: "本群 LLM 模型", type: "model-select", full: true, hint: "本群审核/入群审批使用的服务+模型；先在上方全局 LLM 服务中添加" },
+  { key: "llm_chat", label: "审核 LLM 模型", type: "model-select", full: true, hint: "本群消息审核与入群审批使用的模型（来自 AstrBot 已配置的 LLM）" },
   { key: "guard_enable", label: "群消息违规审核", type: "toggle", hint: "关闭后 LLM 审核不生效" },
   { key: "guard_action", label: "违规处置方式", type: "select", options: ["ban", "recall", "recall_and_ban"], hint: "ban=禁言 recall=撤回 recall_and_ban=撤回并禁言" },
   { key: "guard_ban_seconds", label: "基础禁言时长（秒）", type: "text", hint: "阶梯第一档，支持 30-120 随机范围" },
@@ -36,15 +30,13 @@ const GROUP_FIELDS = [
 // 兼容中英文逗号分割
 const toCsv = (v) => (Array.isArray(v) ? v.join(", ") : v ?? "");
 const fromCsv = (s) => String(s || "").split(/[,，]/).map((x) => x.trim()).filter(Boolean);
-const newProviderId = () => "p" + Date.now().toString(36) + Math.floor(Math.random() * 1000).toString(36);
 
-// 页面状态：当前群、该群的配置（global + group）、LLM 服务池
+// 页面状态：当前群、该群配置、AstrBot 已配置模型
 let groups = [];
 let currentGroup = "";
 let currentGroupName = "";
-let globalConfig = {};
 let groupConfig = {};
-let providers = [];
+let astrbotProviders = [];
 
 /* ---------- bridge 封装 ---------- */
 async function api(path, method = "GET", data) {
@@ -128,65 +120,7 @@ async function selectGroup(gid, name) {
 
 $("switchGroup").addEventListener("click", () => openGroupPicker(false));
 
-/* ---------- 全局 LLM 服务池编辑器 ---------- */
-function renderProviders() {
-  const rows = $("providerRows");
-  if (!providers.length) {
-    rows.innerHTML = '<div class="empty" style="padding:16px 0">尚未添加 LLM 服务</div>';
-    return;
-  }
-  rows.innerHTML = providers.map((p, i) =>
-    `<div class="provider-row" data-pid="${escapeHtml(p.id || "")}">` +
-    `<input class="p-name" placeholder="名称（如 DeepSeek）" value="${escapeHtml(p.name || "")}">` +
-    `<input class="p-base" placeholder="接口地址 https://api.xxx.com/v1" value="${escapeHtml(p.base_url || "")}">` +
-    `<input class="p-key" type="password" placeholder="API Key" value="${escapeHtml(p.api_key || "")}">` +
-    `<input class="p-models" placeholder="模型名（逗号分隔，如 deepseek-chat,glm-4-flash）" value="${escapeHtml(toCsv(p.models))}">` +
-    `<button class="btn ghost sm danger" data-i="${i}" type="button">删</button></div>`
-  ).join("");
-  rows.querySelectorAll("button[data-i]").forEach((btn) => {
-    btn.addEventListener("click", () => {
-      providers.splice(Number(btn.dataset.i), 1);
-      renderProviders();
-      renderConfigForm(); // 联动更新本群模型下拉
-    });
-  });
-}
-
-function collectProviders() {
-  return [...document.querySelectorAll("#providerRows .provider-row")].map((r) => ({
-    id: r.dataset.pid || newProviderId(),
-    name: r.querySelector(".p-name").value.trim(),
-    base_url: r.querySelector(".p-base").value.trim(),
-    api_key: r.querySelector(".p-key").value.trim(),
-    models: fromCsv(r.querySelector(".p-models").value),
-  })).filter((p) => p.base_url && p.api_key && p.models.length);
-}
-
-$("addProvider").addEventListener("click", () => {
-  providers.push({ id: newProviderId(), name: "", base_url: "", api_key: "", models: [] });
-  renderProviders();
-  renderConfigForm();
-});
-
 /* ---------- 配置表单 ---------- */
-function renderGlobalFields() {
-  const grid = $("globalFields");
-  grid.innerHTML = GLOBAL_FIELDS.map((f) => {
-    const val = globalConfig[f.key];
-    return `<div class="field ${f.full ? "full" : ""}"><label>${f.label}</label>` +
-      `<input type="number" data-gkey="${f.key}" value="${escapeHtml(val ?? "")}">` +
-      (f.hint ? `<div class="hint">${f.hint}</div>` : "") + `</div>`;
-  }).join("");
-}
-
-function collectGlobalFields() {
-  const out = {};
-  document.querySelectorAll("#globalFields [data-gkey]").forEach((n) => {
-    out[n.dataset.gkey] = n.value === "" ? null : Number(n.value);
-  });
-  return out;
-}
-
 function renderConfigForm() {
   const wrap = $("configForm");
   wrap.innerHTML = '<div class="form-grid" style="grid-template-columns:1fr 1fr 1fr"></div>';
@@ -208,29 +142,14 @@ function renderConfigForm() {
         f.options.map((o) => `<option value="${o}" ${String(val) === o ? "selected" : ""}>${o}</option>`).join("") +
         "</select>" + (f.hint ? `<div class="hint">${f.hint}</div>` : "");
     } else if (f.type === "model-select") {
-      // 本群 LLM 选择：提供商 + 模型 两个联动下拉
-      const sel = groupConfig.llm_use || {};
-      const selPid = sel.provider_id || "";
-      const selModel = sel.model || "";
-      const pdOpts = providers.map((p) =>
-        `<option value="${escapeHtml(p.id)}" ${p.id === selPid ? "selected" : ""}>${escapeHtml(p.name || p.id)}</option>`
+      // 本群 LLM 选择：选项来自 AstrBot 已配置的聊天模型，值即 chat provider id
+      const opts = astrbotProviders.map((p) =>
+        `<option value="${escapeHtml(p.id)}" ${p.id === val ? "selected" : ""}>${escapeHtml(p.label || p.id)}</option>`
       ).join("");
-      const activeP = providers.find((p) => p.id === selPid) || providers[0];
-      const mdOpts = (activeP ? activeP.models : []).map((m) =>
-        `<option value="${escapeHtml(m)}" ${m === selModel ? "selected" : ""}>${escapeHtml(m)}</option>`
-      ).join("");
-      el.innerHTML = `<label>${f.label}</label><div class="model-sel">` +
-        `<select class="sel-provider">${pdOpts || '<option value="">未配置</option>'}</select>` +
-        `<select class="sel-model">${mdOpts || '<option value="">暂无模型</option>'}</select></div>` +
-        (f.hint ? `<div class="hint">${f.hint}</div>` : "");
-      // 提供商切换时联动刷新模型下拉
-      const pd = el.querySelector(".sel-provider");
-      const ms = el.querySelector(".sel-model");
-      pd.addEventListener("change", () => {
-        const p = providers.find((x) => x.id === pd.value);
-        ms.innerHTML = (p ? p.models : []).map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`).join("") ||
-          '<option value="">暂无模型</option>';
-      });
+      el.innerHTML = `<label>${f.label}</label><select data-key="${f.key}">` +
+        `<option value="">（未选择）</option>${opts}</select>` +
+        (f.hint ? `<div class="hint">${f.hint}</div>` : "") +
+        (astrbotProviders.length ? "" : '<div class="hint" style="color:var(--warn)">AstrBot 中未配置 LLM，请先在 AstrBot 设置中添加模型</div>');
     } else if (f.type === "textarea") {
       el.innerHTML = `<label>${f.label}</label><textarea data-key="${f.key}">${escapeHtml(val ?? "")}</textarea>` +
         (f.hint ? `<div class="hint">${f.hint}</div>` : "");
@@ -253,28 +172,20 @@ function collectGroupConfig() {
     else if (node.classList.contains("csv")) out[key] = fromCsv(node.value);
     else out[key] = node.value;
   });
-  // 本群 LLM 选择：把两个联动下拉合成 llm_use 对象
-  const pd = document.querySelector("#configForm .sel-provider");
-  const ms = document.querySelector("#configForm .sel-model");
-  if (pd && ms && pd.value) {
-    out.llm_use = { provider_id: pd.value, model: ms.value };
-  } else {
-    out.llm_use = { provider_id: "", model: "" };
-  }
   return out;
 }
 
 async function loadConfig() {
   try {
-    const data = await api("config", "GET", { group_id: currentGroup });
-    globalConfig = data.global || {};
-    groupConfig = data.group || {};
-    providers = (globalConfig.llm_providers || []).map((p) => ({ ...p, models: [...(p.models || [])] }));
+    const [cfgData, provData] = await Promise.all([
+      api("config", "GET", { group_id: currentGroup }),
+      api("providers").catch(() => ({ providers: [] })),
+    ]);
+    groupConfig = cfgData.group || {};
+    astrbotProviders = (provData && provData.providers) || [];
   } catch (e) {
     toast("configToast", "加载配置失败：" + e, true);
   }
-  renderProviders();
-  renderGlobalFields();
   renderConfigForm();
 }
 
@@ -282,12 +193,8 @@ $("saveConfig").addEventListener("click", async () => {
   const btn = $("saveConfig");
   btn.disabled = true;
   try {
-    const global = { llm_providers: collectProviders(), ...collectGlobalFields() };
-    await api("config/save", "POST", { global, group_id: currentGroup, group: collectGroupConfig() });
+    await api("config/save", "POST", { group_id: currentGroup, group: collectGroupConfig() });
     toast("configToast", "已保存");
-    // 保存后刷新本群模型下拉关联的服务池
-    providers = global.llm_providers;
-    renderConfigForm();
   } catch (e) {
     toast("configToast", "保存失败：" + e, true);
   }
@@ -420,7 +327,6 @@ function renderSchedules(data) {
   $("scheduleEmpty").classList.toggle("hidden", tasks.length > 0);
   tbody.innerHTML = "";
   tasks.forEach((s, i) => {
-    const key = `${currentGroup}-${s.id || i}`;
     const modeBadge = s.mode === "weekly" ? "blue" : s.mode === "daily" ? "green" : "";
     const modeTxt = { once: "单次", daily: "每日", weekly: "每周" }[s.mode] || s.mode;
     const statusBadge = s.started
@@ -447,7 +353,6 @@ async function loadSchedules() {
 }
 
 // 定时禁言表单默认作用于当前群
-$("sGroup").value = "";
 $("setSchedule").addEventListener("click", async () => {
   const payload = {
     group_id: $("sGroup").value.trim() || currentGroup,

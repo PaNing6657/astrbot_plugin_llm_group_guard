@@ -132,7 +132,7 @@ class MessageGuard:
         verdict = await self.reviewer.judge_message(
             user_id, text,
             prompt=gconf.get("guard_prompt") or "",
-            model_sel=gconf.get("llm_use"),
+            chat_id=gconf.get("llm_chat") or "",
         )
         if verdict is None:
             logger.warning(
