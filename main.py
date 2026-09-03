@@ -31,7 +31,6 @@ DEFAULT_GLOBAL_CONFIG = {}
 DEFAULT_GROUP_CONFIG = {
     "llm_chat": "",  # 本群审核使用的 AstrBot LLM 模型 ID（如 botcf/gpt-5.6-luna）
     "llm_chat_fallback": "",  # 备用模型：主模型技术性失败时自动切换（内容风控不切换）
-    "llm_chat_ocr": "",  # 识图模型：图片消息由该模型转述文字后一并审核（支持识图的多模态模型）
     "guard_enable": False,
     "guard_action": "ban",
     "guard_ban_seconds": "600",
@@ -470,51 +469,21 @@ class LLMGroupGuardPlugin(Star):
                         raw = await res if asyncio.iscoroutine(res) else res
             except Exception as e:
                 error += f" | provider_manager: {e}"
-        out = []
-        detail_parts = []
+        out, seen = [], set()
         for p in raw or []:
             pid = ""
-            vision = False
             try:
                 if isinstance(p, dict):
                     # 兼容配置记录 dict 形态
                     pid = str(p.get("id") or p.get("provider_id") or "").strip()
-                    mods = p.get("modalities")
-                    if isinstance(mods, list):
-                        vision = any(
-                            str(m).strip().lower() in ("image", "vision", "img", "图片") for m in mods
-                        )
-                    elif isinstance(mods, str):
-                        vision = "image" in mods.lower()
                 else:
-                    try:
-                        meta = p.meta() if hasattr(p, "meta") else p
-                        if isinstance(meta, dict):
-                            pid = str(meta.get("id") or "").strip()
-                        else:
-                            pid = str(getattr(meta, "id", "") or "").strip()
-                    except Exception as e:
-                        if len(detail_parts) < 5:
-                            detail_parts.append(f"provider[{type(p).__name__}] meta 解析失败: {e}")
-                        continue
-                    try:
-                        # 识图能力探测失败不影响模型列出
-                        vision = LLMReviewer.provider_supports_vision(p)
-                    except Exception:
-                        vision = False
-            except Exception as e:
-                if len(detail_parts) < 5:
-                    detail_parts.append(f"provider[{type(p).__name__}] 解析异常: {e}")
+                    meta = p.meta() if hasattr(p, "meta") else p
+                    pid = str(getattr(meta, "id", "") or "").strip()
+            except Exception:
                 continue
             if pid and pid not in seen:
                 seen.add(pid)
-                out.append({"id": pid, "label": pid, "vision": vision})
-        if not out and raw:
-            detail = "；".join(detail_parts) or f"共 {len(raw)} 个条目，全部无有效 id（type={type(raw).__name__}）"
-            logger.warning(f"[Guard] AstrBot 模型列表全部解析失败: {detail}")
-            error = f"检测到 {len(raw)} 个模型条目但全部解析失败：{detail}"
-        elif not out and not raw:
-            error = "未检测到任何模型（AstrBot 中无已配置的聊天模型，或接口未返回）"
+                out.append({"id": pid, "label": pid})
         if not out and error:
             logger.warning(f"[Guard] 获取 AstrBot 模型列表异常: {error}")
         return json_response({"providers": out, "error": error or None})

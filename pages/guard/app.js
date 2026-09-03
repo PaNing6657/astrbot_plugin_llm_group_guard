@@ -6,7 +6,6 @@ const $ = (id) => document.getElementById(id);
 const GROUP_FIELDS = [
   { key: "llm_chat", label: "审核 LLM 模型（主）", type: "model-select", full: true, hint: "本群消息审核与入群审批使用的主模型（来自 AstrBot 已配置的 LLM）" },
   { key: "llm_chat_fallback", label: "备用 LLM 模型", type: "model-select", full: true, hint: "主模型技术性失败（请求错误/空输出/解析失败）时自动切换；内容风控不切换" },
-  { key: "llm_chat_ocr", label: "识图 LLM 模型", type: "model-select", full: true, hint: "图片消息用该模型转述图片内容（需支持识图的多模态模型），转述文字并入关键词与 LLM 审核；留空则不审核图片" },
   { key: "guard_enable", label: "群消息违规审核", type: "toggle", hint: "关闭后 LLM 审核不生效" },
   { key: "guard_action", label: "违规处置方式", type: "select", options: ["ban", "recall", "recall_and_ban"], hint: "ban=禁言 recall=撤回 recall_and_ban=撤回并禁言" },
   { key: "guard_ban_seconds", label: "基础禁言时长（秒）", type: "text", hint: "阶梯第一档，支持 30-120 随机范围" },
@@ -144,9 +143,9 @@ function renderConfigForm() {
         f.options.map((o) => `<option value="${o}" ${String(val) === o ? "selected" : ""}>${o}</option>`).join("") +
         "</select>" + (f.hint ? `<div class="hint">${f.hint}</div>` : "");
     } else if (f.type === "model-select") {
-      // 本群 LLM 选择：选项来自 AstrBot 已配置的聊天模型，值即 chat provider id；支持识图的标注（识图）
+      // 本群 LLM 选择：选项来自 AstrBot 已配置的聊天模型，值即 chat provider id
       const opts = astrbotProviders.map((p) =>
-        `<option value="${escapeHtml(p.id)}" ${p.id === val ? "selected" : ""}>${escapeHtml(p.label || p.id)}${p.vision ? "（识图）" : ""}</option>`
+        `<option value="${escapeHtml(p.id)}" ${p.id === val ? "selected" : ""}>${escapeHtml(p.label || p.id)}</option>`
       ).join("");
       el.innerHTML = `<label>${f.label}</label><select data-key="${f.key}">` +
         `<option value="">（未选择）</option>${opts}</select>` +
