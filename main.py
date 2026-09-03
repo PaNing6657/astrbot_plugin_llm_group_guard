@@ -445,7 +445,7 @@ class LLMGroupGuardPlugin(Star):
     async def web_group_list(self):
         """GET /{base}/groups：返回机器人为群主/管理员的群列表（带 60 秒缓存，?force=1 强刷）。"""
         now = time.time()
-        force = str(request.query_params.get("force") or "").strip() == "1"
+        force = str(request.query.get("force") or "").strip() == "1"
         cache = getattr(self, "_groups_cache", None)
         if not force and cache and now - cache.get("ts", 0) < 60 and cache.get("bot") is not None:
             return json_response({"groups": cache.get("groups", []), "cached": True})
