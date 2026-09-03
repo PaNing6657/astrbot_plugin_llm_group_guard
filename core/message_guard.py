@@ -91,11 +91,29 @@ class MessageGuard:
                 return kw
         return None
 
+    @staticmethod
+    def _extract_image_urls(event: AiocqhttpMessageEvent) -> list:
+        """从消息链提取图片 URL 列表（aiocqhttp/OneBot image 段，最多 3 张）。"""
+        raw = getattr(event.message_obj, "raw_message", None)
+        if not isinstance(raw, dict):
+            return []
+        segs = raw.get("message")
+        if not isinstance(segs, list):
+            segs = [segs] if isinstance(segs, dict) else []
+        urls = []
+        for s in segs:
+            if isinstance(s, dict) and s.get("type") == "image":
+                u = str((s.get("data") or {}).get("url") or "")
+                if u.startswith(("http://", "https://")):
+                    urls.append(u)
+        return urls[:3]
+
     async def _handle(self, event: AiocqhttpMessageEvent) -> bool:
         """完整审核一条消息（关键字/LLM+处置），返回 True 表示违规（应拦截回复）。"""
         text = (event.message_str or "").strip()
-        if not text or text.startswith("/"):
-            return False  # 空消息与指令消息不审核
+        image_urls = self._extract_image_urls(event)
+        if (not text and not image_urls) or text.startswith("/"):
+            return False  # 空消息与指令消息不审核（纯图片消息可审）
         group_id = event.get_group_id()
         user_id = str(event.get_sender_id())
         if not group_id or not user_id:
@@ -113,6 +131,9 @@ class MessageGuard:
             role = str((raw_message.get("sender") or {}).get("role") or "member").lower()
             if role in ("owner", "admin"):
                 return False  # 群主/管理员豁免
+
+        # 违规日志用的展示文本：纯图消息记占位，避免空记录
+        log_text = text if text else f"[图片消息 x{len(image_urls)}]"
 
         # 关键词检测：独立开关，本地匹配无成本不节流；命中即处置并结束
         if gconf.get("keyword_guard_enable"):
@@ -165,6 +186,8 @@ class MessageGuard:
             prompt=gconf.get("guard_prompt") or "",
             chat_id=gconf.get("llm_chat") or "",
             fallback_chat_id=gconf.get("llm_chat_fallback") or "",
+            image_urls=image_urls,
+            ocr_chat_id=gconf.get("llm_ocr_chat") or "",
         )
         if verdict is None:
             logger.warning(
@@ -192,7 +215,7 @@ class MessageGuard:
         reason = str(verdict.get("reason") or "违规发言")[:100]
         message_id = getattr(event.message_obj, "message_id", None)
         await self._apply_action(
-            event, group_id, user_id, message_id, text,
+            event, group_id, user_id, message_id, log_text,
             reason=reason, tracker=self.violation_tracker, source="llm", gconf=gconf,
         )
         self._mark_handled(key)

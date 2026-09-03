@@ -67,19 +67,20 @@ _✨ 全体禁言（即时/定时） + LLM 违规消息自动审核 ✨_
 
 ## 🛡️ _LLM 违规消息审核_
 
-1. 直接使用 **AstrBot 已配置的 LLM** 审核：先在 AstrBot WebUI 中添加好模型，再到插件 WebUI 为**每个群选择**主模型（`llm_chat`）与**备用模型**（`llm_chat_fallback`）。主模型**技术性失败**（请求错误、空输出、解析失败）时自动切换到备用模型；**内容风控拦截不切换**（消息已被判敏感，直接按违规处理）
-2. 开启 `guard_enable`，群内普通成员消息将交由所选模型判定是否违规
-3. 违规处置由 `guard_action` 控制：
+1. 直接使用 **AstrBot 已配置的 LLM** 审核：先在 AstrBot WebUI 中添加好模型，再到插件 WebUI 为**每个群选择**主模型（`llm_chat`）、**备用模型**（`llm_chat_fallback`）与 **OCR 转述模型**（`llm_ocr_chat`，需支持识图）。主模型**技术性失败**（请求错误、空输出、解析失败）时自动切换到备用模型；**内容风控拦截不切换**（消息已被判敏感，直接按违规处理）
+2. **图片消息审核**：模型识图（AstrBot `modalities` 含 `image`）则直接带图审核；主模型与兜底模型均不识图时，先用 OCR 模型转述图片内容再按文本审核（转述结果两阶段复用）。纯图片消息也可审核，违规日志以 `[图片消息 xN]` 记录
+3. 开启 `guard_enable`，群内普通成员消息将交由所选模型判定是否违规
+4. 违规处置由 `guard_action` 控制：
 
    - `ban`：仅禁言（默认）
 
    - `recall`：仅撤回（**撤回达到** **`guard_recall_ban_threshold`** **次后自动禁言**，默认 3 次；0=永远只撤回）
 
    - `recall_and_ban`：撤回并禁言
-4. **阶梯禁言**（`guard_stair_enable` 默认开启）：同一成员每次违规，禁言时长按 `guard_stair_multiplier`（默认 2）翻倍递增——第 1 次 = `guard_ban_seconds`（默认 600 秒），第 2 次 = 1200 秒，第 3 次 = 2400 秒……封顶 `guard_stair_max_seconds`（默认 1 天）。关闭则固定为基础时长
-5. **审核要求自定义**：在 `guard_prompt` 中写明本群禁止的内容（广告/辱骂/引战/涉黄赌毒等），LLM 会侧重审核
-6. 处置后可配置 `guard_notice` 发送提示消息（支持 `{user_id}`、`{duration}`、`{count}` 占位符）
-7. **风控降级策略**：若所选模型因消息内容高风险拒绝输出（`guard_risk_as_violation` 默认开启），将**视为违规直接处置**——拒绝本身即说明内容敏感；关闭则保守跳过
+5. **阶梯禁言**（`guard_stair_enable` 默认开启）：同一成员每次违规，禁言时长按 `guard_stair_multiplier`（默认 2）翻倍递增——第 1 次 = `guard_ban_seconds`（默认 600 秒），第 2 次 = 1200 秒，第 3 次 = 2400 秒……封顶 `guard_stair_max_seconds`（默认 1 天）。关闭则固定为基础时长
+6. **审核要求自定义**：在 `guard_prompt` 中写明本群禁止的内容（广告/辱骂/引战/涉黄赌毒等），LLM 会侧重审核
+7. 处置后可配置 `guard_notice` 发送提示消息（支持 `{user_id}`、`{duration}`、`{count}` 占位符）
+8. **风控降级策略**：若所选模型因消息内容高风险拒绝输出（`guard_risk_as_violation` 默认开启），将**视为违规直接处置**——拒绝本身即说明内容敏感；关闭则保守跳过
 
 违规次数按群统计并持久化（`violation_counts.json`），机器人重启不丢失。
 

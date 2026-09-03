@@ -31,6 +31,7 @@ DEFAULT_GLOBAL_CONFIG = {}
 DEFAULT_GROUP_CONFIG = {
     "llm_chat": "",  # 本群审核使用的 AstrBot LLM 模型 ID（如 botcf/gpt-5.6-luna）
     "llm_chat_fallback": "",  # 备用模型：主模型技术性失败时自动切换（内容风控不切换）
+    "llm_ocr_chat": "",  # OCR 转述模型（需支持识图）：主/兜底模型不识图时先转述图片再审
     "guard_enable": False,
     "guard_action": "ban",
     "guard_ban_seconds": "600",
@@ -483,7 +484,17 @@ class LLMGroupGuardPlugin(Star):
                 continue
             if pid and pid not in seen:
                 seen.add(pid)
-                out.append({"id": pid, "label": pid})
+                # 标记该模型是否支持识图（modalities 含 image），供前端提示
+                vision = False
+                try:
+                    vision = self.reviewer.model_supports_image(pid)
+                except Exception:
+                    vision = False
+                out.append({
+                    "id": pid,
+                    "label": pid + ("（识图）" if vision else ""),
+                    "vision": vision,
+                })
         if not out and error:
             logger.warning(f"[Guard] 获取 AstrBot 模型列表异常: {error}")
         return json_response({"providers": out, "error": error or None})
