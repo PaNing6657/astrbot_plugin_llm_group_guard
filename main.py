@@ -132,8 +132,8 @@ class LLMGroupGuardPlugin(Star):
 
         # 定时全体禁言调度器（任务持久化，重启恢复）
         self.scheduler = WholeBanScheduler(self.data_dir, logger)
-        # LLM 审核器（读全局 LLM 服务池）与消息守卫（按群取配置）
-        self.reviewer = LLMReviewer(config)
+        # LLM 审查器：直接复用 AstrBot 的 LLM provider，消息守卫按群取配置
+        self.reviewer = LLMReviewer(config, context)
         self.guard = MessageGuard(config, self.reviewer, data_dir=str(self.data_dir), gconf_provider=self._gconf)
         # 群内最近一次缓存的 bot 客户端，供定时任务在无事件上下文时使用
         self._group_runtime: dict[str, dict] = {}

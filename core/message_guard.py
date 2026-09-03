@@ -108,9 +108,9 @@ class MessageGuard:
         # LLM 审核：独立开关，与关键词检测互不影响
         if not gconf.get("guard_enable"):
             return
-        if not self.reviewer.enabled():
+        if not gconf.get("llm_chat") or not self.reviewer.enabled():
             logger.info(
-                "[MessageGuard] LLM 服务池为空或配置不完整，跳过审核"
+                "[MessageGuard] 本群未选择 LLM 模型或 AstrBot 上下文不可用，跳过审核"
             )
             return
 
