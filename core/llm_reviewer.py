@@ -1,8 +1,9 @@
 # core/llm_reviewer.py
 """LLM 审查器：复用 AstrBot 已配置的 LLM provider，判定违规与入群申请。
 
-- 每个群在 WebUI 选择 AstrBot 的一个聊天模型（llm_chat，如 botcf/gpt-5.6-luna）
-- 调用通过 self.context.llm_generate(chat_provider_id=..., prompt=...) 完成
+- 每个群在 WebUI 选择 AstrBot 的聊天模型（llm_chat，如 botcf/gpt-5.6-luna）
+- 文本审核通过 self.context.llm_generate(chat_provider_id=..., prompt=...) 完成
+- 支持识图的审核模型可“直接看图”：图片消息把图片连同审核指令一起交给该模型
 - 模型输出需为 JSON；解析失败按错误类型记录，供上层保守跳过或风险拦截判定
 """
 
@@ -69,21 +70,89 @@ class LLMReviewer:
         """是否具备调用能力：AstrBot 运行上下文可用（所选模型是否有效由调用方 chat_id 决定）。"""
         return self.context is not None
 
+    @staticmethod
+    def provider_supports_vision(provider) -> bool:
+        """探测 provider 是否支持识图：优先读添加模型时设置的 modalities（模态）配置。"""
+        meta = None
+        try:
+            meta = provider.meta()
+        except Exception:
+            pass
+        # 模态列表/字符串：包含 图片/image/vision 即视为支持识图
+        modal_sources = []
+        if meta is not None:
+            modal_sources.append(getattr(meta, "modalities", None))
+        modal_sources.append(getattr(provider, "config", {}).get("modalities", None) if hasattr(provider, "config") else None)
+        for source in modal_sources:
+            if isinstance(source, list):
+                if any(str(m).strip().lower() in ("image", "vision", "img", "图片") for m in source):
+                    return True
+            elif isinstance(source, str) and source.strip():
+                if any(k in source.lower() for k in ("image", "vision", "图片")):
+                    return True
+        # 兜底传统字段
+        try:
+            if meta is not None:
+                return bool(
+                    getattr(meta, "vision", None)
+                    or getattr(meta, "multimodal", None)
+                    or getattr(meta, "supports_vision", None)
+                )
+        except Exception:
+            pass
+        return False
+
+    def supports_vision(self, chat_id: str) -> bool:
+        """指定模型是否支持识图（可直接看图）。"""
+        if not chat_id or self.context is None:
+            return False
+        try:
+            provider = self.context.get_provider_by_id(chat_id)
+            return provider is not None and self.provider_supports_vision(provider)
+        except Exception:
+            return False
+
     async def close(self) -> None:
         """无需自持连接，无需清理。"""
 
+    @staticmethod
+    def _resp_text(resp) -> str:
+        """兼容不同模型返回形态：str / tuple(str,...) / LLMResponse / dict。"""
+        if isinstance(resp, (tuple, list)):
+            resp = resp[0] if resp else ""
+        elif hasattr(resp, "completion_text"):
+            resp = resp.completion_text
+        elif hasattr(resp, "get"):
+            resp = resp.get("completion_text") or resp.get("text") or ""
+        return str(resp or "").strip()
+
+    @staticmethod
+    async def _provider_text_chat(provider, prompt: str, image_urls) -> str:
+        """调用 provider 的 text_chat，兼容关键字/位置参数，返回文本。"""
+        try:
+            resp = await provider.text_chat(prompt=prompt, image_urls=list(image_urls))
+        except TypeError as e:
+            logger.debug(f"[LLMReviewer] text_chat 关键字参数不受支持，改用位置参数: {e}")
+            resp = await provider.text_chat(prompt, list(image_urls))
+        return LLMReviewer._resp_text(resp)
+
     async def _ask(
-        self, chat_id: str, fallback_chat_id: str, system: str, user: str
+        self,
+        chat_id: str,
+        fallback_chat_id: str,
+        system: str,
+        user: str,
+        image_urls: Optional[list] = None,
     ) -> Optional[dict]:
-        """调用 AstrBot 指定聊天模型并解析 JSON 结果；主模型技术性失败时自动切到备用模型。"""
-        result = await self._ask_one(chat_id, system, user)
+        """调用模型并解析 JSON；主模型技术性失败时自动切到备用模型。"""
+        result = await self._ask_one(chat_id, system, user, image_urls)
         if result is not None:
             return result
         # 主模型失败：技术性故障切备用；内容风控（消息被判敏感）切换无意义，不切
         fb = (fallback_chat_id or "").strip()
         if fb and fb != chat_id and self.last_error_type != "risk_block":
             prior = self.last_error
-            result = await self._ask_one(fb, system, user)
+            result = await self._ask_one(fb, system, user, image_urls)
             if result is not None:
                 logger.info(
                     f"[LLMReviewer] 主模型 {chat_id} 失败，已切换到备用 {fb}: {prior}"
@@ -93,8 +162,14 @@ class LLMReviewer:
                 self.last_error_type = ""
         return result
 
-    async def _ask_one(self, chat_id: str, system: str, user: str) -> Optional[dict]:
-        """对单个模型发起生成并解析 JSON 结果。"""
+    async def _ask_one(
+        self,
+        chat_id: str,
+        system: str,
+        user: str,
+        image_urls: Optional[list] = None,
+    ) -> Optional[dict]:
+        """对单个模型发起生成并解析 JSON 结果；带图且模型支持识图时直接传图。"""
         if not chat_id:
             self.last_error = "本群未选择 LLM 模型（llm_chat 为空）"
             self.last_error_type = "request_fail"
@@ -103,17 +178,34 @@ class LLMReviewer:
             self.last_error = "AstrBot 运行上下文不可用"
             self.last_error_type = "request_fail"
             return None
-        try:
-            resp = await self.context.llm_generate(
-                chat_provider_id=chat_id, prompt=f"{system}\n\n{user}"
-            )
-            content = getattr(resp, "completion_text", "") or ""
-        except Exception as e:
-            self.last_error = f"调用 {chat_id} 失败: {e}"
-            self.last_error_type = "request_fail"
-            logger.error(f"[LLMReviewer] {self.last_error}")
-            return None
-        content = str(content).strip()
+        prompt = f"{system}\n\n{user}"
+        if image_urls:
+            if not self.supports_vision(chat_id):
+                self.last_error = f"模型 {chat_id} 不支持识图，无法直接审核图片"
+                self.last_error_type = "request_fail"
+                logger.warning(f"[LLMReviewer] {self.last_error}")
+                return None
+            try:
+                provider = self.context.get_provider_by_id(chat_id)
+                if provider is None:
+                    self.last_error = f"模型 {chat_id} 不可用"
+                    self.last_error_type = "request_fail"
+                    return None
+                content = await self._provider_text_chat(provider, prompt, image_urls)
+            except Exception as e:
+                self.last_error = f"调用 {chat_id} 审核图片失败: {e}"
+                self.last_error_type = "request_fail"
+                logger.error(f"[LLMReviewer] {self.last_error}")
+                return None
+        else:
+            try:
+                resp = await self.context.llm_generate(chat_provider_id=chat_id, prompt=prompt)
+                content = self._resp_text(resp)
+            except Exception as e:
+                self.last_error = f"调用 {chat_id} 失败: {e}"
+                self.last_error_type = "request_fail"
+                logger.error(f"[LLMReviewer] {self.last_error}")
+                return None
         if not content:
             self.last_error = f"模型 {chat_id} 返回空内容"
             self.last_error_type = "empty_content"
@@ -131,6 +223,27 @@ class LLMReviewer:
             return None
         return result
 
+    async def describe_image(self, image_url: str, ocr_chat_id: str) -> str:
+        """用支持识图的多模态模型转述图片内容（文字/画面），失败返回空字符串。"""
+        if not ocr_chat_id or self.context is None:
+            return ""
+        try:
+            provider = self.context.get_provider_by_id(ocr_chat_id)
+            if provider is None:
+                self.last_error = f"识图模型 {ocr_chat_id} 不可用"
+                logger.warning(f"[LLMReviewer] {self.last_error}")
+                return ""
+            content = await self._provider_text_chat(
+                provider,
+                "请识别并完整转录这张图片中的文字内容；若图片不含文字，请简要描述图片画面。",
+                [image_url],
+            )
+        except Exception as e:
+            self.last_error = f"调用识图模型 {ocr_chat_id} 失败: {e}"
+            logger.warning(f"[LLMReviewer] {self.last_error}")
+            return ""
+        return content
+
     async def judge_message(
         self,
         sender: str,
@@ -138,20 +251,26 @@ class LLMReviewer:
         prompt: str = "",
         chat_id: str = "",
         fallback_chat_id: str = "",
+        extra_context: str = "",
+        image_urls: Optional[list] = None,
     ) -> Optional[dict]:
         """判定一条群消息是否违规。违规时 allowed 为 false。
 
         prompt 为该群自定义审核要求（guard_prompt，由调用方传入），完全由用户定义、
         无内置默认话术；未填写时系统提示仅保留 JSON 输出格式约束。
         chat_id 为该群选用的 AstrBot 聊天模型，fallback_chat_id 为备用模型
-        （主模型技术性失败时自动切换）。当模型输出触发风控特征时，返回带
+        （主模型技术性失败时自动切换）。extra_context 为图片转述文本
+        （模型不支持识图时由识图模型转入）；image_urls 为消息附带的图片 URL
+        （模型支持识图时直接传图审核）。当模型输出触发风控特征时，返回带
         source="risk_block" 的疑似违规判定（消息内容疑似敏感）；其余失败返回 None。
         """
         wanted = str(prompt or "").strip()
         # 不内置任何默认提示词：自定义要求非空时拼在格式约束前，为空则仅输出格式约束
         system = f"{wanted}\n{_JSON_RULE}" if wanted else _JSON_RULE
         user = f"发言者：{sender}\n消息内容：{text[:2000]}"
-        result = await self._ask(chat_id, fallback_chat_id, system, user)
+        if extra_context:
+            user += f"\n该消息附带图片的转述内容：\n{extra_context[:1500]}"
+        result = await self._ask(chat_id, fallback_chat_id, system, user, image_urls)
         if result is None and self.last_error_type == "risk_block":
             return {
                 "allowed": False,

@@ -31,6 +31,7 @@ DEFAULT_GLOBAL_CONFIG = {}
 DEFAULT_GROUP_CONFIG = {
     "llm_chat": "",  # 本群审核使用的 AstrBot LLM 模型 ID（如 botcf/gpt-5.6-luna）
     "llm_chat_fallback": "",  # 备用模型：主模型技术性失败时自动切换（内容风控不切换）
+    "llm_chat_ocr": "",  # 识图模型：图片消息由该模型转述文字后一并审核（支持识图的多模态模型）
     "guard_enable": False,
     "guard_action": "ban",
     "guard_ban_seconds": "600",
@@ -469,21 +470,27 @@ class LLMGroupGuardPlugin(Star):
                         raw = await res if asyncio.iscoroutine(res) else res
             except Exception as e:
                 error += f" | provider_manager: {e}"
-        out, seen = [], set()
+        out = []
         for p in raw or []:
             pid = ""
+            vision = False
             try:
                 if isinstance(p, dict):
                     # 兼容配置记录 dict 形态
                     pid = str(p.get("id") or p.get("provider_id") or "").strip()
+                    mods = p.get("modalities")
+                    vision = isinstance(mods, list) and any(
+                        str(m).strip().lower() in ("image", "vision", "img", "图片") for m in mods
+                    ) or (isinstance(mods, str) and "image" in mods.lower())
                 else:
                     meta = p.meta() if hasattr(p, "meta") else p
                     pid = str(getattr(meta, "id", "") or "").strip()
+                    vision = LLMReviewer.provider_supports_vision(p)
             except Exception:
                 continue
             if pid and pid not in seen:
                 seen.add(pid)
-                out.append({"id": pid, "label": pid})
+                out.append({"id": pid, "label": pid, "vision": vision})
         if not out and error:
             logger.warning(f"[Guard] 获取 AstrBot 模型列表异常: {error}")
         return json_response({"providers": out, "error": error or None})

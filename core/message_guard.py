@@ -91,6 +91,32 @@ class MessageGuard:
                 return kw
         return None
 
+    def _extract_image_urls(self, event: AiocqhttpMessageEvent) -> list[str]:
+        """从消息中提取图片来源 URL（消息段 image 优先，CQ 码兜底）。"""
+        urls = []
+        msg_obj = getattr(event, "message_obj", None)
+        segs = getattr(msg_obj, "message", None)
+        if isinstance(segs, dict):
+            segs = [segs]
+        elif segs is not None and not isinstance(segs, list):
+            segs = list(getattr(segs, "segments", None) or [])
+        for seg in segs or []:
+            if isinstance(seg, dict):
+                stype, data = seg.get("type"), seg.get("data") or {}
+            else:
+                stype, data = getattr(seg, "type", None), getattr(seg, "data", None) or {}
+            if stype == "image":
+                url = str(data.get("url") or "").strip()
+                if url and url not in urls:
+                    urls.append(url)
+        if not urls:
+            import re as _re
+            for m in _re.finditer(r"\[CQ:image[^\]]*url=([^,\]]+)", event.message_str or ""):
+                u = m.group(1).strip()
+                if u and u not in urls and not u.startswith(("file://", "base64")):
+                    urls.append(u)
+        return urls[:3]  # 最多转述 3 张
+
     async def _handle(self, event: AiocqhttpMessageEvent) -> bool:
         """完整审核一条消息（关键字/LLM+处置），返回 True 表示违规（应拦截回复）。"""
         text = (event.message_str or "").strip()
@@ -114,9 +140,27 @@ class MessageGuard:
             if role in ("owner", "admin"):
                 return False  # 群主/管理员豁免
 
-        # 关键词检测：独立开关，本地匹配无成本不节流；命中即处置并结束
+        # 图片处理：审核主模型支持识图则直接传图给审核；否则配置了识图模型时转述文字供审核
+        image_urls = self._extract_image_urls(event)
+        main_chat = gconf.get("llm_chat") or ""
+        direct_vision = bool(image_urls) and self.reviewer.supports_vision(main_chat)
+        ocr_text = ""
+        if not direct_vision and image_urls:
+            ocr_chat = gconf.get("llm_chat_ocr") or ""
+            if ocr_chat and (gconf.get("keyword_guard_enable") or gconf.get("guard_enable")):
+                parts = []
+                for url in image_urls:
+                    desc = await self.reviewer.describe_image(url, ocr_chat)
+                    if desc:
+                        parts.append(desc)
+                ocr_text = "\n".join(parts).strip()
+                if ocr_text:
+                    logger.info(f"[MessageGuard] 群 {group_id} 成员 {user_id} 图片转述完成: {ocr_text[:80]}…")
+
+        # 关键词检测：独立开关，本地匹配无成本不节流；命中即处置并结束（含图片转述文字）
+        kw_text = f"{text}\n{ocr_text}" if ocr_text else text
         if gconf.get("keyword_guard_enable"):
-            keyword = self._match_keyword(text, gconf)
+            keyword = self._match_keyword(kw_text, gconf)
             if keyword:
                 logger.info(
                     f"[MessageGuard] 群 {group_id} 成员 {user_id} 命中关键词 {keyword!r}，按违规处置"
@@ -165,6 +209,8 @@ class MessageGuard:
             prompt=gconf.get("guard_prompt") or "",
             chat_id=gconf.get("llm_chat") or "",
             fallback_chat_id=gconf.get("llm_chat_fallback") or "",
+            extra_context=ocr_text,
+            image_urls=image_urls if direct_vision else None,
         )
         if verdict is None:
             logger.warning(
