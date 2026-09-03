@@ -479,13 +479,23 @@ class LLMGroupGuardPlugin(Star):
                     # 兼容配置记录 dict 形态
                     pid = str(p.get("id") or p.get("provider_id") or "").strip()
                     mods = p.get("modalities")
-                    vision = isinstance(mods, list) and any(
-                        str(m).strip().lower() in ("image", "vision", "img", "图片") for m in mods
-                    ) or (isinstance(mods, str) and "image" in mods.lower())
+                    if isinstance(mods, list):
+                        vision = any(
+                            str(m).strip().lower() in ("image", "vision", "img", "图片") for m in mods
+                        )
+                    elif isinstance(mods, str):
+                        vision = "image" in mods.lower()
                 else:
-                    meta = p.meta() if hasattr(p, "meta") else p
-                    pid = str(getattr(meta, "id", "") or "").strip()
-                    vision = LLMReviewer.provider_supports_vision(p)
+                    try:
+                        meta = p.meta() if hasattr(p, "meta") else p
+                        pid = str(getattr(meta, "id", "") or "").strip()
+                    except Exception:
+                        continue
+                    try:
+                        # 识图能力探测失败不影响模型列出
+                        vision = LLMReviewer.provider_supports_vision(p)
+                    except Exception:
+                        vision = False
             except Exception:
                 continue
             if pid and pid not in seen:

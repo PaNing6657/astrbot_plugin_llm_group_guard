@@ -82,7 +82,8 @@ class LLMReviewer:
         modal_sources = []
         if meta is not None:
             modal_sources.append(getattr(meta, "modalities", None))
-        modal_sources.append(getattr(provider, "config", {}).get("modalities", None) if hasattr(provider, "config") else None)
+        cfg = getattr(provider, "config", None) or {}
+        modal_sources.append(cfg.get("modalities", None))
         for source in modal_sources:
             if isinstance(source, list):
                 if any(str(m).strip().lower() in ("image", "vision", "img", "图片") for m in source):
