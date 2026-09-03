@@ -56,8 +56,6 @@ def parse_schedule_times(start_str: str, end_str: str, now: Optional[float] = No
         if hm is None:
             raise ValueError(f"开始时间格式非法: {start_str}（应为 now 或 HH:MM）")
         start_dt = datetime.fromtimestamp(now).replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
-        if _minutes_since_midnight(start_dt.timestamp()) <= _minutes_since_midnight(now):
-            start_dt += timedelta(days=1)  # 已过该时刻则顺延到明天
         start_ts = start_dt.timestamp()
 
     if end_txt.isdigit():
@@ -69,11 +67,16 @@ def parse_schedule_times(start_str: str, end_str: str, now: Optional[float] = No
         hm = _parse_hhmm(end_txt)
         if hm is None:
             raise ValueError(f"结束时间格式非法: {end_str}（应为 HH:MM 或分钟数）")
-        start_dt = datetime.fromtimestamp(start_ts)
-        end_dt = start_dt.replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
+        end_dt = datetime.fromtimestamp(start_ts).replace(hour=hm[0], minute=hm[1], second=0, microsecond=0)
         if end_dt.timestamp() <= start_ts:
             end_dt += timedelta(days=1)  # 早于/等于开始时间，视为次日凌晨
         end_ts = end_dt.timestamp()
+
+    # 开始时刻今天已过：仅当今日窗口也已完全结束才整体顺延到明天；
+    # 仍处于窗口内（now < end）则保持今天，由调度循环立即补开启（当天设置当天生效）
+    if start_ts < now and end_ts <= now:
+        start_ts += 86400
+        end_ts += 86400
 
     if end_ts <= start_ts:
         raise ValueError("结束时间必须晚于开始时间")
