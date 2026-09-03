@@ -38,6 +38,8 @@ class MessageGuard:
         self.violation_log = ViolationLog(data_dir, logger) if data_dir else None
         self._last_check: dict[str, float] = {}  # sender_id -> ts
         self._sem = asyncio.Semaphore(2)  # 限制 LLM 审核并发
+        # 最近已完整审过的消息键（预审与后台共用，防止同一消息被处理两次）
+        self._handled: list[str] = []
 
     def schedule(self, event: AiocqhttpMessageEvent) -> None:
         """后台执行审核，不阻塞消息事件处理。"""
@@ -46,12 +48,37 @@ class MessageGuard:
         except RuntimeError as exc:
             logger.error(f"[MessageGuard] 无法创建审核任务（不在事件循环中）: {exc}")
 
+    async def pre_review(self, event: AiocqhttpMessageEvent) -> bool:
+        """AI 会话回复前的先审：返回 True 表示消息违规（应拦截该次回复）。"""
+        try:
+            async with self._sem:
+                return await self._handle(event)
+        except Exception as exc:
+            logger.error(f"[MessageGuard] 预审异常: {exc}")
+            return False
+
     async def _guarded(self, event: AiocqhttpMessageEvent) -> None:
         try:
             async with self._sem:
                 await self._handle(event)
         except Exception as exc:
             logger.error(f"[MessageGuard] 审核异常: {exc}")
+
+    def _msg_key(self, event: AiocqhttpMessageEvent) -> str:
+        """消息去重键：优先 message_id，缺失时用 群+用户+文本 兜底。"""
+        mid = getattr(event.message_obj, "message_id", None)
+        gid, uid = event.get_group_id(), event.get_sender_id()
+        if mid:
+            return f"{gid}:{uid}:{mid}"
+        return f"{gid}:{uid}:{event.message_str or ''}"
+
+    def _mark_handled(self, key: str) -> None:
+        self._handled.append(key)
+        if len(self._handled) > 300:
+            del self._handled[:-300]  # 裁剪，防止无限增长
+
+    def _is_handled(self, key: str) -> bool:
+        return key in self._handled
 
     def _whitelisted(self, user_id: str, gconf: dict) -> bool:
         return user_id in {str(u).strip() for u in gconf.get("user_whitelist", []) if str(u).strip()}
@@ -64,25 +91,28 @@ class MessageGuard:
                 return kw
         return None
 
-    async def _handle(self, event: AiocqhttpMessageEvent) -> None:
+    async def _handle(self, event: AiocqhttpMessageEvent) -> bool:
+        """完整审核一条消息（关键字/LLM+处置），返回 True 表示违规（应拦截回复）。"""
         text = (event.message_str or "").strip()
         if not text or text.startswith("/"):
-            return  # 空消息与指令消息不审核
-
+            return False  # 空消息与指令消息不审核
         group_id = event.get_group_id()
         user_id = str(event.get_sender_id())
         if not group_id or not user_id:
-            return
+            return False
+        key = self._msg_key(event)
+        if self._is_handled(key):
+            return False  # 该消息已被预审/后台完整处理过，跳过（去重）
         # 每群独立配置：由插件按群惰性创建并补齐默认值
         gconf = self._gconf_provider(group_id) if self._gconf_provider else self.config
 
         if event.is_admin() or self._whitelisted(user_id, gconf):
-            return  # AstrBot 管理员与白名单豁免
+            return False  # AstrBot 管理员与白名单豁免
         raw_message = getattr(event.message_obj, "raw_message", None)
         if isinstance(raw_message, dict):
             role = str((raw_message.get("sender") or {}).get("role") or "member").lower()
             if role in ("owner", "admin"):
-                return  # 群主/管理员豁免
+                return False  # 群主/管理员豁免
 
         # 关键词检测：独立开关，本地匹配无成本不节流；命中即处置并结束
         if gconf.get("keyword_guard_enable"):
@@ -103,16 +133,17 @@ class MessageGuard:
                     source="keyword",
                     gconf=gconf,
                 )
-                return
+                self._mark_handled(key)
+                return True
 
         # LLM 审核：独立开关，与关键词检测互不影响
         if not gconf.get("guard_enable"):
-            return
+            return False
         if not gconf.get("llm_chat") or not self.reviewer.enabled():
             logger.info(
                 "[MessageGuard] 本群未选择 LLM 模型或 AstrBot 上下文不可用，跳过审核"
             )
-            return
+            return False
 
         # 节流：guard_interval<=0 表示关闭，每条消息都审核
         raw_interval = gconf.get("guard_interval")
@@ -126,7 +157,7 @@ class MessageGuard:
         if interval > 0:
             now = time.time()
             if now - self._last_check.get(user_id, 0) < interval:
-                return
+                return False
             self._last_check[user_id] = now
 
         verdict = await self.reviewer.judge_message(
@@ -140,20 +171,23 @@ class MessageGuard:
                 f"[MessageGuard] LLM 审核无结果，保守跳过: 群 {group_id} 用户 {user_id}。"
                 f"原因：{self.reviewer.last_error or '未知'}"
             )
-            return
+            return False
+        violated = False
         if verdict.get("source") == "risk_block":
             # 服务端风控拒绝 → 消息被服务端判定为高风险，按配置视为违规处置
             if not gconf.get("guard_risk_as_violation", True):
                 logger.info(
                     f"[MessageGuard] 风控拦截但已配置不视为违规，保守跳过: 群 {group_id} 用户 {user_id}"
                 )
-                return
+                return False
             logger.info(
                 f"[MessageGuard] 服务端风控拦截，视为违规: 群 {group_id} 用户 {user_id}"
             )
+            violated = True
         elif bool(verdict.get("allowed")):
             logger.info(f"[MessageGuard] 群 {group_id} 成员 {user_id} 消息判定合规，不处置")
-            return
+            self._mark_handled(key)  # 已完整审核过（合规），后台无需重复审核
+            return False
 
         reason = str(verdict.get("reason") or "违规发言")[:100]
         message_id = getattr(event.message_obj, "message_id", None)
@@ -161,6 +195,8 @@ class MessageGuard:
             event, group_id, user_id, message_id, text,
             reason=reason, tracker=self.violation_tracker, source="llm", gconf=gconf,
         )
+        self._mark_handled(key)
+        return True
 
     async def _apply_action(
         self,

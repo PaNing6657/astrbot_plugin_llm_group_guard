@@ -867,6 +867,27 @@ class LLMGroupGuardPlugin(Star):
             return
         self.guard.schedule(event)
 
+    # 先审核后回复：AI 会话请求发起前对消息先审，违规则拦截（不回复），处置照常由 MessageGuard 执行
+    # 条件注册：旧版 AstrBot 若无 on_llm_request 钩子，该方法不生效，不影响其他功能
+    async def on_pre_llm_request(self, event: AstrMessageEvent, req) -> None:
+        try:
+            if not isinstance(event, AiocqhttpMessageEvent):
+                return
+            if not event.get_group_id():
+                return
+            violated = await self.guard.pre_review(event)
+        except Exception as e:
+            logger.error(f"[Guard] 预审异常: {e}")
+            return
+        if violated:
+            try:
+                event.stop_event()  # 终止本次 LLM 请求，机器人不回复该消息
+            except Exception as e:
+                logger.debug(f"[Guard] 预审拦截 stop_event 失败: {e}")
+
+    if hasattr(filter, "on_llm_request"):
+        on_pre_llm_request = filter.on_llm_request()(on_pre_llm_request)
+
     def _is_manager_like(self, event) -> bool:
         """判断发送者是否为机器管理员/群主/群管理员。"""
         if getattr(event, "is_admin", lambda: False)():
