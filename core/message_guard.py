@@ -24,9 +24,11 @@ from .violation_tracker import KEYWORD_COUNTS_FILE, ViolationLog, ViolationTrack
 
 
 class MessageGuard:
-    def __init__(self, config: dict, reviewer: LLMReviewer, data_dir=None):
+    def __init__(self, config: dict, reviewer: LLMReviewer, data_dir=None, gconf_provider=None):
         self.config = config
         self.reviewer = reviewer
+        # 按群取配置的回调（由插件传入 _gconf），缺省回退到顶层 config
+        self._gconf_provider = gconf_provider
         self.violation_tracker = ViolationTracker(data_dir, logger) if data_dir else None
         # 关键词违规独立计数，与 LLM 违规分开累计
         self.keyword_tracker = (
@@ -51,12 +53,12 @@ class MessageGuard:
         except Exception as exc:
             logger.error(f"[MessageGuard] 审核异常: {exc}")
 
-    def _whitelisted(self, user_id: str) -> bool:
-        return user_id in {str(u).strip() for u in self.config.get("user_whitelist", []) if str(u).strip()}
+    def _whitelisted(self, user_id: str, gconf: dict) -> bool:
+        return user_id in {str(u).strip() for u in gconf.get("user_whitelist", []) if str(u).strip()}
 
-    def _match_keyword(self, text: str) -> Optional[str]:
+    def _match_keyword(self, text: str, gconf: dict) -> Optional[str]:
         """返回消息命中的第一个关键词，未命中返回 None。"""
-        for kw in self.config.get("keyword_list") or []:
+        for kw in gconf.get("keyword_list") or []:
             kw = str(kw).strip()
             if kw and kw in text:
                 return kw
@@ -71,17 +73,10 @@ class MessageGuard:
         user_id = str(event.get_sender_id())
         if not group_id or not user_id:
             return
+        # 每群独立配置：由插件按群惰性创建并补齐默认值
+        gconf = self._gconf_provider(group_id) if self._gconf_provider else self.config
 
-        # 群白名单：空=管理所有群；非空=仅管理白名单内的群
-        group_whitelist = [
-            str(g).strip()
-            for g in (self.config.get("group_whitelist") or [])
-            if str(g).strip()
-        ]
-        if group_whitelist and str(group_id).strip() not in group_whitelist:
-            return
-
-        if event.is_admin() or self._whitelisted(user_id):
+        if event.is_admin() or self._whitelisted(user_id, gconf):
             return  # AstrBot 管理员与白名单豁免
         raw_message = getattr(event.message_obj, "raw_message", None)
         if isinstance(raw_message, dict):
@@ -90,8 +85,8 @@ class MessageGuard:
                 return  # 群主/管理员豁免
 
         # 关键词检测：独立开关，本地匹配无成本不节流；命中即处置并结束
-        if self.config.get("keyword_guard_enable"):
-            keyword = self._match_keyword(text)
+        if gconf.get("keyword_guard_enable"):
+            keyword = self._match_keyword(text, gconf)
             if keyword:
                 logger.info(
                     f"[MessageGuard] 群 {group_id} 成员 {user_id} 命中关键词 {keyword!r}，按违规处置"
@@ -106,20 +101,21 @@ class MessageGuard:
                     reason=f"触发关键词：{keyword}",
                     tracker=self.keyword_tracker,
                     source="keyword",
+                    gconf=gconf,
                 )
                 return
 
         # LLM 审核：独立开关，与关键词检测互不影响
-        if not self.config.get("guard_enable"):
+        if not gconf.get("guard_enable"):
             return
         if not self.reviewer.enabled():
             logger.info(
-                "[MessageGuard] LLM 未配置完整（llm_base_url/llm_api_key/llm_model 任一为空），跳过审核"
+                "[MessageGuard] LLM 服务池为空或配置不完整，跳过审核"
             )
             return
 
         # 节流：guard_interval<=0 表示关闭，每条消息都审核
-        raw_interval = self.config.get("guard_interval")
+        raw_interval = gconf.get("guard_interval")
         if raw_interval in (None, ""):
             interval = 30
         else:
@@ -133,7 +129,11 @@ class MessageGuard:
                 return
             self._last_check[user_id] = now
 
-        verdict = await self.reviewer.judge_message(user_id, text)
+        verdict = await self.reviewer.judge_message(
+            user_id, text,
+            prompt=gconf.get("guard_prompt") or "",
+            model_sel=gconf.get("llm_use"),
+        )
         if verdict is None:
             logger.warning(
                 f"[MessageGuard] LLM 审核无结果，保守跳过: 群 {group_id} 用户 {user_id}。"
@@ -142,7 +142,7 @@ class MessageGuard:
             return
         if verdict.get("source") == "risk_block":
             # 服务端风控拒绝 → 消息被服务端判定为高风险，按配置视为违规处置
-            if not self.config.get("guard_risk_as_violation", True):
+            if not gconf.get("guard_risk_as_violation", True):
                 logger.info(
                     f"[MessageGuard] 风控拦截但已配置不视为违规，保守跳过: 群 {group_id} 用户 {user_id}"
                 )
@@ -158,7 +158,7 @@ class MessageGuard:
         message_id = getattr(event.message_obj, "message_id", None)
         await self._apply_action(
             event, group_id, user_id, message_id, text,
-            reason=reason, tracker=self.violation_tracker, source="llm",
+            reason=reason, tracker=self.violation_tracker, source="llm", gconf=gconf,
         )
 
     async def _apply_action(
@@ -171,8 +171,10 @@ class MessageGuard:
         reason: str = "违规发言",
         tracker: Optional[ViolationTracker] = None,
         source: str = "llm",
+        gconf: Optional[dict] = None,
     ) -> None:
-        action = (self.config.get("guard_action") or "ban").lower()
+        gconf = gconf or (self._gconf_provider(group_id) if self._gconf_provider else self.config)
+        action = (gconf.get("guard_action") or "ban").lower()
         bot = event.bot
 
         # 阶梯计数：本次违规累计次数（LLM 与关键词各自独立计数）
@@ -186,7 +188,7 @@ class MessageGuard:
             self.violation_log.add(group_id, user_id, text, reason, source)
 
         # 是否禁言：ban/recall_and_ban 直接禁言；纯撤回模式下撤回达到阈值后禁言
-        threshold = int(self.config.get("guard_recall_ban_threshold") or 0)
+        threshold = int(gconf.get("guard_recall_ban_threshold") or 0)
         do_ban = action in ("ban", "recall_and_ban")
         if action == "recall" and threshold > 0 and count >= threshold:
             do_ban = True
@@ -200,7 +202,7 @@ class MessageGuard:
 
         duration = 0
         if do_ban:
-            duration = self._stair_duration(count)
+            duration = self._stair_duration(count, gconf)
             if duration > 0:
                 try:
                     await bot.api.call_action(
@@ -216,7 +218,7 @@ class MessageGuard:
                 except Exception as exc:
                     logger.warning(f"[MessageGuard] 禁言失败: {exc}。请确认 Bot 具有管理员权限。")
 
-        notice = str(self.config.get("guard_notice") or "").strip()
+        notice = str(gconf.get("guard_notice") or "").strip()
         if notice:
             try:
                 await bot.send_group_msg(
@@ -228,15 +230,15 @@ class MessageGuard:
             except Exception as exc:
                 logger.warning(f"[MessageGuard] 违规通知发送失败: {exc}")
 
-    def _stair_duration(self, count: int) -> int:
+    def _stair_duration(self, count: int, gconf: dict) -> int:
         """阶梯禁言时长：第 N 次违规 = 基础时长 × 倍数^(N-1)，封顶。"""
-        base = self._parse_duration(str(self.config.get("guard_ban_seconds") or "600"))
+        base = self._parse_duration(str(gconf.get("guard_ban_seconds") or "600"))
         if base <= 0:
             return 0
-        if not self.config.get("guard_stair_enable", True):
+        if not gconf.get("guard_stair_enable", True):
             return base
-        multiplier = int(self.config.get("guard_stair_multiplier") or 2)
-        cap = int(self.config.get("guard_stair_max_seconds") or 86400)
+        multiplier = int(gconf.get("guard_stair_multiplier") or 2)
+        cap = int(gconf.get("guard_stair_max_seconds") or 86400)
         return min(base * (multiplier ** max(count - 1, 0)), cap)
 
     @staticmethod

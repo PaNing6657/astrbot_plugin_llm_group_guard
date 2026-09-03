@@ -1,4 +1,6 @@
 import asyncio
+import json
+import os
 import re
 import time
 from typing import Optional
@@ -18,6 +20,53 @@ from .core.message_guard import MessageGuard
 
 PLUGIN_NAME = "astrbot_plugin_llm_group_guard"
 CHECK_INTERVAL = 20  # 定时禁言调度循环检查间隔（秒）
+
+# 已移除 _conf_schema.json（不提供 AstrBot 自带设置页），
+# 配置默认值内聚于此，全部由插件 WebUI 页面管理。
+# 配置分为两级：global（LLM 服务池等账号级共享）+ groups（每群独立策略）
+DEFAULT_GLOBAL_CONFIG = {
+    "llm_providers": [],  # [{id,name,base_url,api_key,models:[...]}，WebUI 动态增删]
+    "llm_timeout": 30,
+    "llm_max_tokens": 2000,
+}
+
+DEFAULT_GROUP_CONFIG = {
+    "llm_use": {"provider_id": "", "model": ""},  # 本群选用的 LLM 服务+模型
+    "guard_enable": False,
+    "guard_action": "ban",
+    "guard_ban_seconds": "600",
+    "guard_stair_enable": True,
+    "guard_stair_multiplier": 2,
+    "guard_stair_max_seconds": 86400,
+    "guard_recall_ban_threshold": 3,
+    "guard_interval": 30,
+    "guard_risk_as_violation": True,
+    "guard_prompt": "",
+    "guard_notice": "",
+    "keyword_guard_enable": False,
+    "join_verify_enable": False,
+    "join_welcome_msg": "欢迎 {nickname} 加入本群！OID：{oid}",
+    "join_card_notify": True,
+    "join_card_notify_msg": "已自动将 {nickname} 的群名片修改为 {new_card}",
+    "join_card_notify_fail_msg": "",
+    "ai_reply_only_manager": False,
+    "ai_reply_whitelist": [],
+    "keyword_list": [],
+    "user_whitelist": [],
+    "whole_ban_enable_msg": "🔇 全体禁言已开启，请保持安静",
+    "whole_ban_disable_msg": "🔊 全体禁言已解除，可以正常发言了",
+    "Permission_verification": True,
+    "allow_groupadmin_use": False,
+}
+CONFIG_FILE = "config.json"  # 插件配置本地持久化文件名
+
+# 旧版扁平配置迁移所需的键分类
+_LEGACY_GLOBAL_KEYS = {"llm_base_url", "llm_api_key", "llm_model",
+                       "llm_fallback_base_urls", "llm_fallback_api_keys", "llm_fallback_models",
+                       "llm_timeout", "llm_max_tokens"}
+_LEGACY_GROUP_KEYS = set(DEFAULT_GROUP_CONFIG) | {"group_whitelist"}
+_GLOBAL_CONFIG_KEYS = set(DEFAULT_GLOBAL_CONFIG)
+_GROUP_CONFIG_KEYS = set(DEFAULT_GROUP_CONFIG)
 
 _WEEKDAY_NAMES = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "日": 7, "天": 7}
 _WEEKDAY_CN = {1: "周一", 2: "周二", 3: "周三", 4: "周四", 5: "周五", 6: "周六", 7: "周日"}
@@ -67,22 +116,59 @@ def _to_weekly_rule(start_ts: float, end_ts: float) -> dict:
     }
 
 
+def _migrate_providers_from_legacy(legacy: dict) -> list:
+    """旧扁平 llm_* 配置 → LLM 服务池 [{id,name,base_url,api_key,models}]。"""
+    providers = []
+    base = str(legacy.get("llm_base_url") or "").strip()
+    key = str(legacy.get("llm_api_key") or "").strip()
+    model = str(legacy.get("llm_model") or "").strip()
+    if base and key and model:
+        providers.append({
+            "id": "p1",
+            "name": "主模型",
+            "base_url": base,
+            "api_key": key,
+            "models": [model],
+        })
+    fb_base = legacy.get("llm_fallback_base_urls") or []
+    fb_key = legacy.get("llm_fallback_api_keys") or []
+    fb_model = legacy.get("llm_fallback_models") or []
+    for i in range(max(len(fb_base), len(fb_key), len(fb_model))):
+        b = str(fb_base[i]).strip() if i < len(fb_base) else ""
+        k = str(fb_key[i]).strip() if i < len(fb_key) else ""
+        m = str(fb_model[i]).strip() if i < len(fb_model) else ""
+        if b and k and m:
+            providers.append({
+                "id": f"p{i + 2}",
+                "name": f"备用{i + 1}",
+                "base_url": b,
+                "api_key": k,
+                "models": [m],
+            })
+    return providers
+
+
 @register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核", "v1.0.0")
 class LLMGroupGuardPlugin(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.data_dir = StarTools.get_data_dir()
         self.config = config
-
-        # 全体禁言开启/解除时发送的自定义消息，留空则不发送
-        self.whole_ban_enable_msg = str(config.get("whole_ban_enable_msg", "") or "")
-        self.whole_ban_disable_msg = str(config.get("whole_ban_disable_msg", "") or "")
+        # 无 _conf_schema.json 时 AstrBot 不再注入默认配置，这里初始化两级配置结构并加载本地持久化
+        config.setdefault("global", {})
+        config.setdefault("groups", {})
+        for key, value in DEFAULT_GLOBAL_CONFIG.items():
+            config["global"].setdefault(key, value)
+        self._config_path = os.path.join(self.data_dir, CONFIG_FILE)
+        # 旧扁平配置迁移用的群配置模板（首次创建任一群配置时套用后清空）
+        self._group_template: dict = {}
+        self._apply_saved_config()
 
         # 定时全体禁言调度器（任务持久化，重启恢复）
         self.scheduler = WholeBanScheduler(self.data_dir, logger)
-        # LLM 审核器与消息守卫
+        # LLM 审核器（读全局 LLM 服务池）与消息守卫（按群取配置）
         self.reviewer = LLMReviewer(config)
-        self.guard = MessageGuard(config, self.reviewer, data_dir=str(self.data_dir))
+        self.guard = MessageGuard(config, self.reviewer, data_dir=str(self.data_dir), gconf_provider=self._gconf)
         # 群内最近一次缓存的 bot 客户端，供定时任务在无事件上下文时使用
         self._group_runtime: dict[str, dict] = {}
         # 审批通过者的 OID 缓存 {gid: {uid: oid}}，供成员进群事件发送欢迎时使用
@@ -97,6 +183,7 @@ class LLMGroupGuardPlugin(Star):
     # ------------------------------------------------------------------
     def _register_web_apis(self):
         base = f"/{PLUGIN_NAME}"
+        self.context.register_web_api(f"{base}/groups", self.web_group_list, ["GET"], "机器人为管理员的群列表")
         self.context.register_web_api(f"{base}/config", self.web_get_config, ["GET"], "读取插件配置")
         self.context.register_web_api(f"{base}/config/save", self.web_save_config, ["POST"], "保存插件配置")
         self.context.register_web_api(f"{base}/violations", self.web_violations, ["GET"], "违规记录列表")
@@ -106,21 +193,114 @@ class LLMGroupGuardPlugin(Star):
         self.context.register_web_api(f"{base}/schedules/delete", self.web_schedule_delete, ["POST"], "删除某群定时禁言")
 
     async def web_get_config(self):
-        return json_response(dict(self.config))
+        # GET /config?group_id=X：返回全局配置 + 该群配置
+        gid = str(request.query_params.get("group_id") or "").strip()
+        if not gid:
+            return error_response("缺少 group_id 参数")
+        return json_response({
+            "global": self.config.get("global") or {},
+            "group": self._gconf(gid),
+        })
 
     async def web_save_config(self):
         payload = await request.json(default={})
         if not isinstance(payload, dict):
             return error_response("请求体必须是 JSON 对象")
         try:
-            self.config.update(payload)
-            self.config.save_config()
+            # global 段只接受已知全局键；group 段需伴随 group_id 保存到该群配置
+            gnew = payload.get("global")
+            if isinstance(gnew, dict):
+                gconf_global = self.config.setdefault("global", {})
+                gconf_global.update({k: v for k, v in gnew.items() if k in _GLOBAL_CONFIG_KEYS})
+            gid = str(payload.get("group_id") or "").strip()
+            gnew = payload.get("group")
+            if gid and isinstance(gnew, dict):
+                gconf = self._gconf(gid)
+                gconf.update({k: v for k, v in gnew.items() if k in _GROUP_CONFIG_KEYS})
+            self._save_config()
         except Exception as e:
             logger.error(f"WebUI 保存配置失败: {e}")
             return error_response(f"保存失败：{e}")
-        self.whole_ban_enable_msg = str(self.config.get("whole_ban_enable_msg", "") or "")
-        self.whole_ban_disable_msg = str(self.config.get("whole_ban_disable_msg", "") or "")
         return json_response({"saved": True})
+
+    def _apply_saved_config(self):
+        """加载本地持久化配置；旧扁平结构自动迁移为 global/groups 两级结构。"""
+        loaded = None
+        if os.path.isfile(self._config_path):
+            try:
+                with open(self._config_path, encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    loaded = data
+            except (OSError, ValueError) as e:
+                logger.warning(f"[Guard] 读取本地配置失败: {e}")
+        if not loaded:
+            # 首次升级：迁移旧版 AstrBot 自带设置页遗留的配置文件
+            old_candidates = [
+                os.path.join(self.data_dir, "config", f"{PLUGIN_NAME}_config.json"),
+                os.path.join(self.data_dir, "..", "config", f"{PLUGIN_NAME}_config.json"),
+            ]
+            for cand in old_candidates:
+                try:
+                    with open(cand, encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, dict) and data:
+                        loaded = data
+                        break
+                except (OSError, ValueError):
+                    continue
+        if not loaded:
+            return
+        g = self.config.setdefault("global", {})
+        groups = self.config.setdefault("groups", {})
+        if "global" in loaded or "groups" in loaded:
+            # 新两级结构：直接合入
+            if isinstance(loaded.get("global"), dict):
+                g.update({k: v for k, v in loaded["global"].items() if k in _GLOBAL_CONFIG_KEYS})
+            if isinstance(loaded.get("groups"), dict):
+                for gid, gval in loaded["groups"].items():
+                    if isinstance(gval, dict):
+                        merged = dict(DEFAULT_GROUP_CONFIG)
+                        merged.update({k: v for k, v in gval.items() if k in _GROUP_CONFIG_KEYS})
+                        groups[str(gid)] = merged
+        else:
+            # 旧扁平结构：llm_* 组装为 providers 池，其余键作为群配置模板
+            providers = _migrate_providers_from_legacy(loaded)
+            if providers:
+                g["llm_providers"] = providers
+            for key in ("llm_timeout", "llm_max_tokens"):
+                if key in loaded:
+                    g[key] = loaded[key]
+            self._group_template = {
+                k: v for k, v in loaded.items()
+                if k in _LEGACY_GROUP_KEYS and k != "group_whitelist"
+            }
+        self._save_config()
+
+    def _gconf(self, group_id):
+        """取某群配置（惰性创建：缺失项用默认值补齐并落盘），返回群配置 dict。"""
+        gid = str(group_id)
+        groups = self.config.setdefault("groups", {})
+        gconf = groups.get(gid)
+        if gconf is None:
+            gconf = dict(DEFAULT_GROUP_CONFIG)
+            # 旧扁平配置首次迁移时套用原群级设置，随后清除模板
+            if self._group_template:
+                gconf.update({k: v for k, v in self._group_template.items() if k in _GROUP_CONFIG_KEYS})
+                self._group_template = {}
+            groups[gid] = gconf
+            self._save_config()
+        return gconf
+
+    def _save_config(self):
+        """把当前配置写回本地 JSON 文件（WebUI 保存配置时调用）。"""
+        try:
+            os.makedirs(self.data_dir, exist_ok=True)
+            with open(self._config_path, "w", encoding="utf-8") as f:
+                json.dump(dict(self.config), f, ensure_ascii=False, indent=2)
+        except Exception as e:
+            logger.error(f"[Guard] 保存配置失败: {e}")
+            raise
 
     async def web_violations(self):
         # 返回 LLM/关键词计数与违规消息日志
@@ -161,6 +341,8 @@ class LLMGroupGuardPlugin(Star):
         if vlog is not None:
             if gid and uid:
                 vlog.clear(gid, uid)
+            elif gid:
+                vlog.clear(gid)
             else:
                 vlog.clear()
         return json_response({
@@ -231,12 +413,76 @@ class LLMGroupGuardPlugin(Star):
             await self._apply_scheduled(gid, old, enable=False)
         return json_response({"deleted": True})
 
-    # 权限开关每次实时读取配置，避免修改配置后需要重启插件才生效
-    def _permission_verification(self) -> bool:
-        return bool(self.config.get("Permission_verification", True))
+    # 权限开关每次实时读取该群配置，避免修改配置后需要重启插件才生效
+    def _permission_verification(self, group_id) -> bool:
+        return bool(self._gconf(group_id).get("Permission_verification", True))
 
-    def _allow_groupadmin_use(self) -> bool:
-        return bool(self.config.get("allow_groupadmin_use", False))
+    def _allow_groupadmin_use(self, group_id) -> bool:
+        return bool(self._gconf(group_id).get("allow_groupadmin_use", False))
+
+    def _get_any_bot(self):
+        """获取任一可用的 aiocqhttp 客户端：平台兜底 → 群消息缓存 → 平台管理器。"""
+        if self._platform_bot is not None:
+            return self._platform_bot
+        for runtime in self._group_runtime.values():
+            if runtime.get("bot") is not None:
+                return runtime["bot"]
+        try:
+            from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_platform_adapter import (
+                AiocqhttpAdapter,
+            )
+            for inst in self.context.platform_manager.get_insts():
+                if isinstance(inst, AiocqhttpAdapter):
+                    client = inst.get_client()
+                    if client is not None:
+                        return client
+        except Exception as e:
+            logger.warning(f"[Guard] 平台管理器获取客户端失败: {e}")
+        return None
+
+    async def web_group_list(self):
+        """GET /{base}/groups：返回机器人为群主/管理员的群列表（带 60 秒缓存，?force=1 强刷）。"""
+        now = time.time()
+        force = str(request.query_params.get("force") or "").strip() == "1"
+        cache = getattr(self, "_groups_cache", None)
+        if not force and cache and now - cache.get("ts", 0) < 60 and cache.get("bot") is not None:
+            return json_response({"groups": cache.get("groups", []), "cached": True})
+        bot = self._get_any_bot()
+        if bot is None:
+            return error_response("未找到可用的机器人连接，请先在任意群发送一条消息后重试")
+        try:
+            groups = await bot.api.call_action("get_group_list")
+            if not isinstance(groups, list):
+                return error_response("机器人暂未加入任何群")
+            login = await bot.api.call_action("get_login_info")
+            self_id = str((login or {}).get("user_id") or "")
+            if not self_id:
+                return error_response("无法获取机器人自身 QQ 号")
+
+            async def _check(g):
+                gid = str(g.get("group_id") or "")
+                if not gid:
+                    return None
+                info = await bot.api.call_action(
+                    "get_group_member_info", group_id=int(gid), user_id=int(self_id)
+                )
+                role = str((info or {}).get("role") or "member").lower()
+                return {
+                    "group_id": gid,
+                    "group_name": str(g.get("group_name") or gid),
+                    "role": role,
+                }
+
+            results = await asyncio.gather(*[_check(g) for g in groups], return_exceptions=True)
+            managed = [
+                r for r in results
+                if isinstance(r, dict) and r["role"] in ("owner", "admin")
+            ]
+            self._groups_cache = {"ts": time.time(), "bot": bot, "groups": managed}
+            return json_response({"groups": managed, "cached": False})
+        except Exception as e:
+            logger.error(f"[Guard] 获取群列表失败: {e}")
+            return error_response(f"获取群列表失败：{e}")
 
     def _init_platform_bot(self):
         """从平台管理器获取 aiocqhttp 客户端，作为定时任务执行的全群兜底。"""
@@ -286,7 +532,9 @@ class LLMGroupGuardPlugin(Star):
             logger.error(f"群 {group_id} {action}全体禁言失败: {e}")
             return False, f"操作失败：无法{action}全体禁言，可能原因是权限不足或API错误"
 
-        template = self.whole_ban_enable_msg if enable else self.whole_ban_disable_msg
+        template = str(
+            self._gconf(group_id).get("whole_ban_enable_msg" if enable else "whole_ban_disable_msg") or ""
+        )
         if template:
             try:
                 text = (
@@ -420,7 +668,7 @@ class LLMGroupGuardPlugin(Star):
             if cache_oid:
                 oid = str(cache_oid)
                 self._join_oid[group_id].pop(user_id, None)  # 欢迎已用，清理缓存
-            template = str(self.config.get("join_welcome_msg") or "").strip()
+            template = str(self._gconf(group_id).get("join_welcome_msg") or "").strip()
             if not template:
                 return  # 未配置欢迎词则不发送
 
@@ -470,8 +718,8 @@ class LLMGroupGuardPlugin(Star):
                 or raw.get("sub_type") != "add"
             ):
                 return
-            if not self.config.get("join_verify_enable"):
-                return  # 开关关闭则不自动审批
+            if not self._gconf(str(raw.get("group_id") or "")).get("join_verify_enable"):
+                return  # 该群开关关闭则不自动审批
 
             group_id = str(raw.get("group_id") or "")
             user_id = str(raw.get("user_id") or "")
@@ -480,17 +728,10 @@ class LLMGroupGuardPlugin(Star):
             if not group_id or not user_id or not flag:
                 return
 
-            # 套用群白名单：填写了白名单则只审批名单内的群
-            group_whitelist = [
-                str(g).strip()
-                for g in (self.config.get("group_whitelist") or [])
-                if str(g).strip()
-            ]
-            if group_whitelist and group_id not in group_whitelist:
-                return
-
             logger.info(f"[Guard] 收到入群申请: 群 {group_id} 用户 {user_id} 申请信息={comment!r}")
-            verdict = await self.reviewer.judge_join_request(comment)
+            verdict = await self.reviewer.judge_join_request(
+                comment, model_sel=self._gconf(group_id).get("llm_use")
+            )
             if verdict is None:
                 # LLM 不可用/失败：不自动审批，留给管理员手动处理
                 logger.warning(
@@ -546,9 +787,8 @@ class LLMGroupGuardPlugin(Star):
             except Exception as e:
                 logger.debug(f"[Guard] 等待入群获取昵称失败: {e}")
         if not card:
-            # 未取到昵称 = 改名片失败
-            logger.warning(f"[Guard] 群 {group_id} 用户 {user_id} 入群后未取到昵称，改名片失败")
-            await self._send_card_notify(bot, group_id, user_id, nickname or user_id, oid, ok=False)
+            # 未取到成员昵称：通常对方实际未进群（如群满/拒绝），静默跳过，不发任何提示
+            logger.warning(f"[Guard] 群 {group_id} 用户 {user_id} 未取到成员信息（可能未实际进群），跳过改名片")
             return
 
         # 改名片
@@ -563,11 +803,12 @@ class LLMGroupGuardPlugin(Star):
             await self._send_card_notify(bot, group_id, user_id, nickname or user_id, oid, ok=False)
 
     async def _send_card_notify(self, bot, group_id, user_id, nickname, oid: str, ok: bool, card: str = "") -> None:
-        """按改名片成功/失败分别发送对应提示语（受 join_card_notify 开关控制）。"""
-        if not self.config.get("join_card_notify"):
+        """按改名片成功/失败分别发送对应提示语（受该群 join_card_notify 开关控制）。"""
+        gconf = self._gconf(group_id)
+        if not gconf.get("join_card_notify"):
             return
         template = str(
-            (self.config.get("join_card_notify_msg") if ok else self.config.get("join_card_notify_fail_msg"))
+            (gconf.get("join_card_notify_msg") if ok else gconf.get("join_card_notify_fail_msg"))
             or ""
         ).strip()
         if not template:
@@ -600,14 +841,16 @@ class LLMGroupGuardPlugin(Star):
         event = unwrap_event(event)
         group_id = event.get_group_id()
         logger.debug(f"[Guard] 收到群消息监听事件: group={group_id} sender={event.get_sender_id()} text={event.message_str[:50]!r}")
-        if group_id:
-            self._group_runtime[str(group_id)] = {"bot": event.bot}
+        if not group_id:
+            return
+        self._group_runtime[str(group_id)] = {"bot": event.bot}
+        gconf = self._gconf(group_id)
         # AI 回复范围开关：非群主/群管/机器人管理员且非白名单的消息不进入 AI 会话（含免@对话）
         # 仅阻止 AI 会话处理，不影响本插件审核/指令等功能
         if (
-            self.config.get("ai_reply_only_manager")
+            gconf.get("ai_reply_only_manager")
             and not self._is_manager_like(event)
-            and not self._in_ai_reply_whitelist(event)
+            and not self._in_ai_reply_whitelist(event, gconf)
         ):
             try:
                 event.stop_event()  # 阻止后续 AI 会话处理
@@ -629,9 +872,9 @@ class LLMGroupGuardPlugin(Star):
                 return True
         return False
 
-    def _in_ai_reply_whitelist(self, event) -> bool:
-        """发送者是否在 AI 回复白名单（开启仅管理回复时白名单成员仍可触发 AI 回复）。"""
-        allow_list = self.config.get("ai_reply_whitelist") or []
+    def _in_ai_reply_whitelist(self, event, gconf: dict) -> bool:
+        """发送者是否在该群 AI 回复白名单（开启仅管理回复时白名单成员仍可触发 AI 回复）。"""
+        allow_list = gconf.get("ai_reply_whitelist") or []
         return str(event.get_sender_id()) in {str(x).strip() for x in allow_list}
 
     # ------------------------------------------------------------------
@@ -699,7 +942,7 @@ class LLMGroupGuardPlugin(Star):
             # 普通成员可禁言/解禁自己；禁言他人才需要管理权限
             if target_qq != operator_qq and self._permission_verification():
                 has_perm, error_msg = await check_group_and_permission(
-                    event, self._allow_groupadmin_use(), event.get_sender_name()
+                    event, self._allow_groupadmin_use(group_id), event.get_sender_name()
                 )
                 if not has_perm:
                     await event.bot.send_group_msg(group_id=int(group_id), message=error_msg)
@@ -818,7 +1061,7 @@ class LLMGroupGuardPlugin(Star):
             # 普通成员可禁言/解禁自己；操作他人才需要管理权限
             if target_qq != operator_qq and self._permission_verification():
                 has_perm, error_msg = await check_group_and_permission(
-                    event, self._allow_groupadmin_use(), operator_name
+                    event, self._allow_groupadmin_use(group_id), operator_name
                 )
                 if not has_perm:
                     return {"status": "error", "message": error_msg}
@@ -863,7 +1106,7 @@ class LLMGroupGuardPlugin(Star):
 
         if self._permission_verification():
             has_perm, error_msg = await check_group_and_permission(
-                event, self._allow_groupadmin_use(), operator_name
+                event, self._allow_groupadmin_use(group_id), operator_name
             )
             if not has_perm:
                 return event.plain_result(error_msg)
@@ -893,7 +1136,7 @@ class LLMGroupGuardPlugin(Star):
 
             if self._permission_verification():
                 has_perm, error_msg = await check_group_and_permission(
-                    event, self._allow_groupadmin_use(), operator_name
+                    event, self._allow_groupadmin_use(group_id), operator_name
                 )
                 if not has_perm:
                     return {"status": "error", "message": error_msg}
@@ -934,7 +1177,7 @@ class LLMGroupGuardPlugin(Star):
 
         if self._permission_verification():
             has_perm, error_msg = await check_group_and_permission(
-                event, self._allow_groupadmin_use(), operator_name
+                event, self._allow_groupadmin_use(group_id), operator_name
             )
             if not has_perm:
                 return event.plain_result(error_msg)
@@ -1140,7 +1383,7 @@ class LLMGroupGuardPlugin(Star):
 
             if self._permission_verification():
                 has_perm, error_msg = await check_group_and_permission(
-                    event, self._allow_groupadmin_use(), operator_name
+                    event, self._allow_groupadmin_use(group_id), operator_name
                 )
                 if not has_perm:
                     return {"status": "error", "message": error_msg}

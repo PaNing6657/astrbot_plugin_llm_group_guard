@@ -1,8 +1,8 @@
 # core/llm_reviewer.py
-"""OpenAI 兼容 LLM 审核器：判定群消息是否违规，支持多模型自动切换。
+"""OpenAI 兼容 LLM 审核器：判定群消息是否违规，支持全局服务池 + 按群选模型。
 
-- 主模型：llm_base_url / llm_api_key / llm_model
-- 备用模型：llm_fallback_base_urls / llm_fallback_api_keys / llm_fallback_models（按索引对应）
+- 全局 LLM 服务池：llm_providers（每项 base_url/api_key/models）
+- 每个群在 WebUI 选择使用哪个服务+模型（llm_use），调用时优先，其余模型按全局顺序兜底
 - 技术性错误（HTTP 失败/网络/空内容/解析失败）自动切换到下一个模型重试
 - 内容风控拦截（risk_block）不切换：消息被服务端判定敏感，直接按疑似违规处理
 """
@@ -16,8 +16,6 @@ from typing import Optional
 import aiohttp
 
 from astrbot.api import logger
-
-DEFAULT_BASE_URL = "https://api.openai.com/v1"
 
 _JSON_RULE = (
     "你必须严格只输出一个 JSON 对象，不要输出任何无关文字、注释或 Markdown 代码块。"
@@ -76,47 +74,69 @@ class LLMReviewer:
             self._session = aiohttp.ClientSession()
         return self._session
 
+    def _g(self) -> dict:
+        """全局配置段（LLM 服务池、超时、token 上限）。"""
+        return self.config.get("global") or {}
+
+    def _providers(self) -> list[dict]:
+        """完整 LLM 服务列表（仅保留 base_url/api_key/models 均完整的项）。"""
+        providers = []
+        for p in self._g().get("llm_providers") or []:
+            if not isinstance(p, dict):
+                continue
+            base = str(p.get("base_url") or "").strip().rstrip("/")
+            key = str(p.get("api_key") or "").strip()
+            models = [str(m).strip() for m in (p.get("models") or []) if str(m).strip()]
+            if base and key and models:
+                providers.append({
+                    "id": str(p.get("id") or ""),
+                    "base_url": base,
+                    "api_key": key,
+                    "models": models,
+                })
+        return providers
+
     def enabled(self) -> bool:
-        return bool(
-            (self.config.get("llm_api_key") or "")
-            and (self.config.get("llm_base_url") or "")
-            and (self.config.get("llm_model") or "")
-        )
+        return bool(self._providers())
+
+    def _provider_triples(self, model_sel: Optional[dict]) -> list[tuple[str, str, str]]:
+        """按群选模型优先的调用候选 [(base_url, api_key, model)]，其余模型按全局顺序兜底去重。"""
+        providers = self._providers()
+        triples: list[tuple[str, str, str]] = []
+        seen = set()
+
+        def add(base: str, key: str, model: str):
+            if (base, key, model) not in seen:
+                seen.add((base, key, model))
+                triples.append((base, key, model))
+
+        sel_id = str((model_sel or {}).get("provider_id") or "").strip()
+        sel_model = str((model_sel or {}).get("model") or "").strip()
+        # 1. 群选定的服务+模型优先
+        for p in providers:
+            if p["id"] == sel_id and sel_model in p["models"]:
+                add(p["base_url"], p["api_key"], sel_model)
+                break
+        # 2. 其余模型按全局顺序兜底（技术性失败自动切换）
+        for p in providers:
+            for m in p["models"]:
+                add(p["base_url"], p["api_key"], m)
+        return triples
 
     async def close(self) -> None:
         if self._session is not None and not self._session.closed:
             await self._session.close()
 
-    def _providers(self) -> list[tuple[str, str, str]]:
-        """主模型 + 备用模型（按索引对齐，跳过不完整项），返回 [(base_url, api_key, model)]。"""
-        providers: list[tuple[str, str, str]] = []
-        base = (self.config.get("llm_base_url") or DEFAULT_BASE_URL).strip().rstrip("/")
-        key = str(self.config.get("llm_api_key") or "").strip()
-        model = str(self.config.get("llm_model") or "").strip()
-        if base and key and model:
-            providers.append((base, key, model))
-
-        fb_base = self.config.get("llm_fallback_base_urls") or []
-        fb_key = self.config.get("llm_fallback_api_keys") or []
-        fb_model = self.config.get("llm_fallback_models") or []
-        for i in range(max(len(fb_base), len(fb_key), len(fb_model))):
-            b = str(fb_base[i]).strip().rstrip("/") if i < len(fb_base) else ""
-            k = str(fb_key[i]).strip() if i < len(fb_key) else ""
-            m = str(fb_model[i]).strip() if i < len(fb_model) else ""
-            if b and k and m:
-                providers.append((b, k, m))
-        return providers
-
-    async def _chat(self, system_prompt: str, user_content: str) -> Optional[dict]:
-        providers = self._providers()
-        if not providers:
-            self.last_error = "未配置任何有效的 LLM（主模型与备用模型均不完整）"
+    async def _chat(self, system_prompt: str, user_content: str, model_sel: Optional[dict] = None) -> Optional[dict]:
+        triples = self._provider_triples(model_sel)
+        if not triples:
+            self.last_error = "未配置任何有效的 LLM 服务（LLM 服务池为空或不完整）"
             self.last_error_type = "request_fail"
             logger.error(f"[LLMReviewer] {self.last_error}")
             return None
 
         failures = []
-        for index, (base, key, model) in enumerate(providers):
+        for index, (base, key, model) in enumerate(triples):
             result, err_type, err_msg = await self._try_provider(
                 base, key, model, system_prompt, user_content
             )
@@ -156,9 +176,9 @@ class LLMReviewer:
                 {"role": "user", "content": user_content},
             ],
             "temperature": 0.1,
-            "max_tokens": int(self.config.get("llm_max_tokens") or 2000),
+            "max_tokens": int(self._g().get("llm_max_tokens") or 2000),
         }
-        timeout = int(self.config.get("llm_timeout") or 30)
+        timeout = int(self._g().get("llm_timeout") or 30)
         try:
             async with self._s.post(
                 url,
@@ -212,18 +232,22 @@ class LLMReviewer:
             return None, "parse_fail", f"模型输出无法解析为 JSON: {raw}"
         return result, "", ""
 
-    async def judge_message(self, sender: str, text: str) -> Optional[dict]:
+    async def judge_message(
+        self, sender: str, text: str, prompt: str = "", model_sel: Optional[dict] = None
+    ) -> Optional[dict]:
         """判定一条群消息是否违规。违规时 allowed 为 false。
 
-        当 LLM 服务端因内容风控拒绝请求时，返回带 source="risk_block" 的疑似违规
-        判定（服务端拒绝本身即说明消息内容被判定为高风险）；其余失败返回 None。
+        prompt 为该群审核要求（guard_prompt，由调用方传入）；
+        model_sel 为该群选用的 LLM 服务+模型。当 LLM 服务端因内容风控拒绝请求时，
+        返回带 source="risk_block" 的疑似违规判定（服务端拒绝本身即说明消息内容被判定为高风险）；
+        其余失败返回 None。
         """
-        prompt = (self.config.get("guard_prompt") or "").strip()
-        if not prompt:
-            prompt = "你是本群的 AI 管理员，请负责地判断群内消息是否存在违规行为。"
-        system = f"{prompt}\n{_JSON_RULE}"
+        wanted = str(prompt or "").strip()
+        if not wanted:
+            wanted = "你是本群的 AI 管理员，请负责地判断群内消息是否存在违规行为。"
+        system = f"{wanted}\n{_JSON_RULE}"
         user = f"发言者：{sender}\n消息内容：{text[:2000]}"
-        result = await self._chat(system, user)
+        result = await self._chat(system, user, model_sel)
         if result is None and self.last_error_type == "risk_block":
             return {
                 "allowed": False,
@@ -232,7 +256,7 @@ class LLMReviewer:
             }
         return result
 
-    async def judge_join_request(self, comment: str) -> Optional[dict]:
+    async def judge_join_request(self, comment: str, model_sel: Optional[dict] = None) -> Optional[dict]:
         """判定入群申请信息是否同时包含【昵称】与【OID/UID】，返回结构化结果。
 
         失败返回 None（如 LLM 未配置或请求失败），由调用方保守处理。
@@ -252,7 +276,7 @@ class LLMReviewer:
         )
         system = f"{prompt}\n{_JOIN_JSON_RULE}"
         user = f"入群验证信息内容：\n{comment[:500]}"
-        result = await self._chat(system, user)
+        result = await self._chat(system, user, model_sel)
         if result is None:
             return None
         return {

@@ -16,7 +16,11 @@
         <p>astrbot_plugin_llm_group_guard</p>
       </div>
     </div>
-    <div class="conn"><span class="conn-dot"></span><span id="connText">连接中</span></div>
+    <div class="top-right">
+      <div class="gcur" id="currentGroup">未选择群</div>
+      <button class="btn ghost sm" id="switchGroup" type="button">切换</button>
+      <div class="conn"><span class="conn-dot"></span><span id="connText">连接中</span></div>
+    </div>
   </header>
 
   <nav class="tabs" id="tabs">
@@ -24,7 +28,6 @@
     <button class="tab" data-tab="violations">违规记录</button>
     <button class="tab" data-tab="schedules">定时禁言</button>
     <button class="tab" data-tab="join">入群审批</button>
-    <button class="tab" data-tab="groups">群管理</button>
   </nav>
 
   <main>
@@ -34,6 +37,15 @@
         <h2>插件配置</h2>
         <span class="page-note">修改后点击保存，实时生效</span>
       </div>
+      <div class="form-title">
+        <h3>全局 LLM 服务</h3>
+        <button class="btn ghost sm" id="addProvider">+ 添加服务</button>
+      </div>
+      <div class="card">
+        <div id="providerRows"></div>
+        <div class="form-grid" id="globalFields" style="margin-top:14px"></div>
+      </div>
+      <div class="section-title">本群配置</div>
       <div class="card" id="configForm"></div>
       <div class="actions">
         <button class="btn primary" id="saveConfig">保存配置</button>
@@ -87,7 +99,7 @@
         <div class="table-wrap">
           <table class="data-table">
             <thead>
-              <tr><th>群号</th><th>模式</th><th>时间</th><th>状态</th><th>操作</th></tr>
+              <tr><th>模式</th><th>时间</th><th>状态</th><th>操作</th></tr>
             </thead>
             <tbody id="scheduleBody"></tbody>
           </table>
@@ -143,26 +155,20 @@
         </div>
       </div>
     </section>
-
-    <!-- 群管理 -->
-    <section class="page" id="page-groups">
-      <div class="page-head">
-        <h2>群管理</h2>
-        <span class="page-note">白名单留空 = 管理所有群</span>
-      </div>
-      <div class="card">
-        <div class="field">
-          <label>受管理群（群白名单）</label>
-          <input id="groupWhitelist" placeholder="多个群号用英文逗号分隔，如 1104414569,123456">
-          <p class="hint">填入群号后，仅白名单内的群启用 LLM 审核；留空则全部群生效</p>
-        </div>
-        <div class="actions">
-          <button class="btn primary" id="saveGroups">保存群白名单</button>
-          <span class="toast" id="groupsToast"></span>
-        </div>
-      </div>
-    </section>
   </main>
+</div>
+
+<!-- 群选择弹窗 -->
+<div class="modal-mask" id="groupModal">
+  <div class="modal group-modal">
+    <div class="modal-head">
+      <h3>选择管理群</h3>
+      <span class="page-note">仅显示机器人为群主/管理员的群</span>
+    </div>
+    <div class="modal-body" id="groupList">
+      <div class="empty">正在获取群列表…</div>
+    </div>
+  </div>
 </div>
 
 <!-- 违规消息历史弹窗 -->

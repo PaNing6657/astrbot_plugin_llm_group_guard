@@ -59,6 +59,54 @@ body {
 .conn-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); }
 .conn.ok .conn-dot { background: var(--ok); box-shadow: 0 0 10px rgba(16, 185, 129, .5); }
 .conn.bad .conn-dot { background: var(--danger); }
+.top-right { display: flex; align-items: center; gap: 12px; }
+.gcur {
+  max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 12px; color: var(--text-dim); font-family: var(--mono);
+  background: var(--panel); border: 1px solid var(--border);
+  padding: 6px 14px; border-radius: 20px;
+}
+
+/* ---------- 群选择弹窗 ---------- */
+.group-modal { width: 460px; }
+.group-item {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  background: var(--bg); border: 1px solid var(--border); border-radius: 10px;
+  padding: 12px 16px; cursor: pointer; transition: all .18s ease;
+}
+.group-item:hover {
+  border-color: var(--accent); background: var(--accent-dim);
+  box-shadow: 0 4px 14px rgba(43, 127, 255, .12); transform: translateY(-1px);
+}
+.g-name { font-size: 14px; font-weight: 600; color: var(--text); }
+.g-meta { display: flex; align-items: center; gap: 8px; flex: none; }
+
+/* ---------- LLM 服务池编辑器 ---------- */
+.form-title {
+  display: flex; align-items: center; justify-content: space-between;
+  margin: 0 0 14px;
+}
+.form-title h3 { font-size: 14px; font-weight: 600; font-family: var(--mono); }
+.section-title {
+  display: flex; align-items: center; gap: 10px;
+  margin: 26px 0 14px; font-size: 13px; font-weight: 600;
+  color: var(--text-dim); font-family: var(--mono); letter-spacing: .02em;
+}
+.section-title::after { content: ""; flex: 1; height: 1px; background: var(--border); }
+.provider-row {
+  display: grid; grid-template-columns: 1fr 1.6fr 1.4fr 1.6fr auto;
+  gap: 10px; align-items: center; margin-bottom: 10px;
+}
+.provider-row input {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px; padding: 8px 10px; font-size: 12px; font-family: var(--mono);
+  outline: none; transition: border-color .18s ease, box-shadow .18s ease;
+}
+.provider-row input:focus {
+  border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim);
+  background: var(--bg-2);
+}
+.model-sel { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 
 /* ---------- tabs ---------- */
 .tabs {
@@ -242,6 +290,8 @@ body {
 @keyframes fade { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 
 @media (max-width: 720px) {
-  .form-grid, .schedule-form { grid-template-columns: 1fr; }
+  .form-grid, .schedule-form, .provider-row, .model-sel { grid-template-columns: 1fr; }
   .shell { padding: 20px 14px 48px; }
+  .top-right { gap: 8px; }
+  .gcur { max-width: 150px; }
 }
