@@ -203,11 +203,32 @@ function renderCopySource() {
     : '<option value="">（暂无其他可同步的群）</option>';
 }
 
+// 沙箱 iframe 中 confirm/prompt 被浏览器禁用，改用二次点击确认
+let copyArmed = null;
+
 $("copyConfig").addEventListener("click", async () => {
+  const btn = $("copyConfig");
   const src = $("copySource").value;
   if (!src) return toast("copyToast", "请选择要同步的源群", true);
   const srcName = ($("copySource").selectedOptions[0] || {}).textContent || src;
-  if (!confirm(`确定用「${srcName}」的配置整体覆盖当前群「${currentGroupName}」的全部设置吗？\n此操作不可撤销`)) return;
+  // 第一次点击：进入确认态（按钮变红提示），3 秒内再点执行；超时恢复
+  if (copyArmed !== src) {
+    copyArmed = src;
+    btn.classList.add("danger");
+    btn.textContent = "再点一次确认覆盖";
+    toast("copyToast", `将用「${srcName}」的配置覆盖当前群，再次点击确认`);
+    clearTimeout(btn._reset);
+    btn._reset = setTimeout(() => {
+      copyArmed = null;
+      btn.classList.remove("danger");
+      btn.textContent = "同步到当前群";
+    }, 3000);
+    return;
+  }
+  copyArmed = null;
+  clearTimeout(btn._reset);
+  btn.classList.remove("danger");
+  btn.textContent = "同步到当前群";
   try {
     await api("config/copy", "POST", { source_group_id: src, target_group_id: currentGroup });
     toast("copyToast", "已同步");
