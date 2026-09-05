@@ -31,7 +31,7 @@ DEFAULT_GLOBAL_CONFIG = {}
 DEFAULT_GROUP_CONFIG = {
     "llm_chat": "",  # 本群审核使用的 AstrBot LLM 模型 ID（如 botcf/gpt-5.6-luna）
     "llm_chat_fallback": "",  # 备用模型：主模型技术性失败时自动切换（内容风控不切换）
-    "llm_ocr_chat": "",  # OCR 转述模型（需支持识图）：主/兜底模型不识图时先转述图片再审
+    "llm_ocr_chat": "",  # 识图审核模型（需支持识图）：审核模型不识图时由它直接带图出判定
     "guard_enable": False,
     "guard_action": "ban",
     "guard_ban_seconds": "600",

@@ -2,10 +2,11 @@
 """LLM 审查器：复用 AstrBot 已配置的 LLM provider，判定违规与入群申请。
 
 - 每个群在 WebUI 选择 AstrBot 的聊天模型：主模型（llm_chat）、备用模型
-  （llm_chat_fallback）、OCR 转述模型（llm_ocr_chat，需支持识图）
+  （llm_chat_fallback）、识图审核模型（llm_ocr_chat，需支持识图）
 - 调用通过 self.context.llm_generate(chat_provider_id=..., prompt=..., contexts=...) 完成
-- 图片消息审核：模型识图（modalities 含 image）则直接带图审核；否则先用 OCR 模型
-  转述图片再按文本审核。主模型技术性失败自动切备用模型，备用模型按同样规则处理
+- 图片消息审核：审核模型识图（modalities 含 image）则直接带图审核；不识图时由
+  识图审核模型直接带图出判定（不转述）。主模型技术性失败自动切备用模型，
+  备用模型按同样规则处理
 - 内容风控拦截不切换（消息已被判敏感，切换无意义）
 - 模型输出需为 JSON；解析失败按错误类型记录，供上层保守跳过或风险拦截判定
 """
@@ -49,12 +50,6 @@ _RISK_KEYWORDS = (
     "拒绝",
 )
 
-_OCR_PROMPT = (
-    "你是图片内容审核助手。请仔细转述这张图片的全部内容：图中的文字（按原样转写）、"
-    "画面场景、人物与物体、任何可疑或不当元素。只输出转述文本，不要任何前言或解释。"
-)
-
-_MAX_DESC_LEN = 800  # 图片转述文本截断长度，防止 prompt 超长
 _MAX_IMAGES = 3  # 单条消息最多送审的图片数
 
 
@@ -112,33 +107,16 @@ class LLMReviewer:
         return False
 
     # ------------------------------------------------------------------
-    # OCR：用识图模型转述图片为文本
-    # ------------------------------------------------------------------
-    async def describe_images(self, image_urls: list, ocr_chat_id: str) -> Optional[str]:
-        """用 OCR 模型转述图片，返回描述文本；未配置/失败返回 None。"""
-        urls = [u for u in (image_urls or []) if str(u).startswith(("http://", "https://"))]
-        if not urls or not ocr_chat_id or self.context is None or not _MULTIMODAL_OK:
-            return None
-        parts = [ImageURLPart(image_url=ImageURLPart.ImageURL(url=u)) for u in urls[:_MAX_IMAGES]]
-        try:
-            resp = await self.context.llm_generate(
-                chat_provider_id=ocr_chat_id,
-                prompt=_OCR_PROMPT,
-                contexts=[UserMessageSegment(content=parts)],
-            )
-            desc = str(getattr(resp, "completion_text", "") or "").strip()
-            return desc[:_MAX_DESC_LEN] if desc else None
-        except Exception as e:
-            logger.warning(f"[LLMReviewer] 图片转述失败（OCR 模型 {ocr_chat_id}）: {e}")
-            return None
-
-    # ------------------------------------------------------------------
     # 核心调用：单模型生成 + JSON 解析（可带图）
     # ------------------------------------------------------------------
     async def _ask_one(
-        self, chat_id: str, system: str, user: str, image_urls: list = None
+        self, chat_id: str, system: str, user: str, image_urls: list = None,
+        force_vision: bool = False,
     ) -> Optional[dict]:
-        """对单个模型发起生成并解析 JSON 结果；模型识图且提供图片时直接带图审核。"""
+        """对单个模型发起生成并解析 JSON 结果；识图模型直接带图审核。
+
+        force_vision=True 时跳过 modalities 声明检查（用于用户指定的识图审核模型）。
+        """
         if not chat_id:
             self.last_error = "本群未选择 LLM 模型（llm_chat 为空）"
             self.last_error_type = "request_fail"
@@ -148,9 +126,9 @@ class LLMReviewer:
             self.last_error_type = "request_fail"
             return None
         prompt = f"{system}\n\n{user}"
-        # 带图条件：有图、框架支持多模态消息、且该模型声明识图（否则退化为纯文本）
+        # 带图条件：有图、框架支持多模态消息；模型声明识图或为指定的识图审核模型
         urls = None
-        if image_urls and _MULTIMODAL_OK and self.model_supports_image(chat_id):
+        if image_urls and _MULTIMODAL_OK and (force_vision or self.model_supports_image(chat_id)):
             urls = [u for u in image_urls if str(u).startswith(("http://", "https://"))][:_MAX_IMAGES] or None
         try:
             kwargs = {"chat_provider_id": chat_id, "prompt": prompt}
@@ -183,8 +161,15 @@ class LLMReviewer:
         return result
 
     # ------------------------------------------------------------------
-    # 主/备调用链：主模型技术性失败切备用；两阶段处理图片（识图直审 / OCR 转述再审）
+    # 主/备调用链：审核模型不识图 → 识图审核模型直接带图出判定；技术性失败切备用
     # ------------------------------------------------------------------
+    @staticmethod
+    def _text_only_user(user: str, image_count: int) -> str:
+        """降级纯文本审核时补充图片数量说明。"""
+        if image_count > 0:
+            return f"{user}\n[消息含 {image_count} 张图片，审核模型不支持识图，图片未审核]"
+        return user
+
     async def _ask(
         self,
         chat_id: str,
@@ -194,22 +179,27 @@ class LLMReviewer:
         image_urls: list = None,
         ocr_chat_id: str = "",
     ) -> Optional[dict]:
-        """主模型审核；技术性失败自动切备用模型。图片按各模型识图能力分别处理。"""
+        """主模型审核；技术性失败自动切备用。审核模型不识图时由识图模型直接带图出判定。"""
         image_urls = list(image_urls or [])
+        ocr = (ocr_chat_id or "").strip()
 
-        # 主模型阶段：不识图且有图 → 先 OCR 转述，转述文本拼入审核输入
-        desc = None
-        main_user = user
-        main_urls = image_urls
+        # 主模型阶段：不识图且有图 → 识图审核模型直接带图审核（判定即最终结果）
         if image_urls and not self.model_supports_image(chat_id):
-            main_urls = None  # 主模型吃不了图，走转述文本
-            desc = await self.describe_images(image_urls, ocr_chat_id)
-            if desc:
-                main_user = f"{user}\n[图片内容转述] {desc}"
-            elif user.strip():
-                main_user = f"{user}\n[消息含 {len(image_urls)} 张图片，未能转述]"
+            if ocr and ocr != chat_id:
+                result = await self._ask_one(ocr, system, user, image_urls, force_vision=True)
+                if result is not None:
+                    return result
+                if self.last_error_type == "risk_block":
+                    return None  # 图片触发风控：上抛，由上层按配置判定
+                logger.warning(
+                    f"[LLMReviewer] 识图审核模型 {ocr} 失败，降级纯文本审核: {self.last_error}"
+                )
+            # 未配置/失败：主模型纯文本审核
+            return await self._ask_one(
+                chat_id, system, self._text_only_user(user, len(image_urls))
+            )
 
-        result = await self._ask_one(chat_id, system, main_user, main_urls)
+        result = await self._ask_one(chat_id, system, user, image_urls)
         if result is not None:
             return result
 
@@ -217,21 +207,26 @@ class LLMReviewer:
         fb = (fallback_chat_id or "").strip()
         if fb and fb != chat_id and self.last_error_type != "risk_block":
             prior = self.last_error
-            fb_user = user
-            fb_urls = image_urls
             if image_urls and not self.model_supports_image(fb):
-                # 兜底模型也不识图：复用/补做 OCR 转述
-                fb_urls = None
-                if desc is None:
-                    desc = await self.describe_images(image_urls, ocr_chat_id)
-                if desc:
-                    fb_user = f"{user}\n[图片内容转述] {desc}"
-                elif user.strip():
-                    fb_user = f"{user}\n[消息含 {len(image_urls)} 张图片，未能转述]"
-            elif image_urls and user.strip():
-                # 兜底模型识图：带原文+图直接审
-                pass
-            result = await self._ask_one(fb, system, fb_user, fb_urls)
+                # 兜底模型也不识图：识图审核模型直接带图审核
+                if ocr and ocr != fb:
+                    result = await self._ask_one(ocr, system, user, image_urls, force_vision=True)
+                    if result is not None:
+                        logger.info(
+                            f"[LLMReviewer] 主模型 {chat_id} 失败，兜底 {fb} 不识图，"
+                            f"已由识图模型 {ocr} 直接带图审核"
+                        )
+                        self.last_error = ""
+                        self.last_error_type = ""
+                        return result
+                    if self.last_error_type == "risk_block":
+                        return None
+                # 识图模型不可用：兜底纯文本审核
+                result = await self._ask_one(
+                    fb, system, self._text_only_user(user, len(image_urls))
+                )
+            else:
+                result = await self._ask_one(fb, system, user, image_urls)
             if result is not None:
                 logger.info(
                     f"[LLMReviewer] 主模型 {chat_id} 失败，已切换到备用 {fb}: {prior}"
@@ -258,9 +253,9 @@ class LLMReviewer:
         prompt 为该群自定义审核要求（guard_prompt，由调用方传入），完全由用户定义、
         无内置默认话术；未填写时系统提示仅保留 JSON 输出格式约束。
         chat_id 为该群选用的 AstrBot 聊天模型，fallback_chat_id 为备用模型；
-        image_urls 为消息中的图片，ocr_chat_id 为图片转述模型（主/兜底模型不识图时使用）。
-        当模型输出触发风控特征时，返回带 source="risk_block" 的疑似违规判定；
-        其余失败返回 None。
+        image_urls 为消息中的图片，ocr_chat_id 为识图审核模型（审核模型不识图时由它
+        直接带图出判定）。当模型输出触发风控特征时，返回带 source="risk_block" 的
+        疑似违规判定；其余失败返回 None。
         """
         wanted = str(prompt or "").strip()
         # 不内置任何默认提示词：自定义要求非空时拼在格式约束前，为空则仅输出格式约束

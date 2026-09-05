@@ -6,7 +6,7 @@ const $ = (id) => document.getElementById(id);
 const GROUP_FIELDS = [
   { key: "llm_chat", label: "审核 LLM 模型（主）", type: "model-select", full: true, hint: "本群消息审核与入群审批使用的主模型（来自 AstrBot 已配置的 LLM，标注（识图）的模型可直接审核图片）" },
   { key: "llm_chat_fallback", label: "备用 LLM 模型", type: "model-select", full: true, hint: "主模型技术性失败（请求错误/空输出/解析失败）时自动切换；内容风控不切换" },
-  { key: "llm_ocr_chat", label: "OCR 转述模型（识图）", type: "model-select", full: true, hint: "主/备用模型不支持识图时，先用该识图模型转述图片再审核；留空则图片无法转述（仅审文本部分）" },
+  { key: "llm_ocr_chat", label: "识图审核模型（识图）", type: "model-select", full: true, hint: "主/备用模型不支持识图时，由该识图模型直接带图审核并出判定；留空则仅审核文本部分" },
   { key: "guard_enable", label: "群消息违规审核", type: "toggle", hint: "关闭后 LLM 审核不生效" },
   { key: "guard_action", label: "违规处置方式", type: "select", options: ["ban", "recall", "recall_and_ban"], hint: "ban=禁言 recall=撤回 recall_and_ban=撤回并禁言" },
   { key: "guard_ban_seconds", label: "基础禁言时长（秒）", type: "text", hint: "阶梯第一档，支持 30-120 随机范围" },
