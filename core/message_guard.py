@@ -108,6 +108,14 @@ class MessageGuard:
     def _is_handled(self, key: str) -> bool:
         return key in self._handled
 
+    @staticmethod
+    def _to_int_id(value) -> Optional[int]:
+        """把消息/群/用户 ID 安全转为 int；形如 '1.1' 的浮点字符串取整，失败返回 None。"""
+        try:
+            return int(float(str(value).strip()))
+        except (TypeError, ValueError):
+            return None
+
     def _whitelisted(self, user_id: str, gconf: dict) -> bool:
         return user_id in {str(u).strip() for u in gconf.get("user_whitelist", []) if str(u).strip()}
 
@@ -307,12 +315,16 @@ class MessageGuard:
         if action == "recall" and threshold > 0 and count >= threshold:
             do_ban = True
 
-        if action in ("recall", "recall_and_ban") and message_id is not None:
-            try:
-                await bot.api.call_action("delete_msg", message_id=int(message_id))
-                logger.info(f"[MessageGuard] 已撤回群 {group_id} 中用户 {user_id} 的违规消息（累计 {count} 次）")
-            except Exception as exc:
-                logger.warning(f"[MessageGuard] 撤回失败: {exc}。请确认 Bot 具有管理员权限。")
+        if action in ("recall", "recall_and_ban"):
+            mid_int = self._to_int_id(message_id)
+            if mid_int is not None:
+                try:
+                    await bot.api.call_action("delete_msg", message_id=mid_int)
+                    logger.info(f"[MessageGuard] 已撤回群 {group_id} 中用户 {user_id} 的违规消息（累计 {count} 次）")
+                except Exception as exc:
+                    logger.warning(f"[MessageGuard] 撤回失败: {exc}。请确认 Bot 具有管理员权限。")
+            else:
+                logger.warning(f"[MessageGuard] 消息 ID 非法无法撤回: {message_id!r}")
 
         duration = 0
         if do_ban:
