@@ -332,12 +332,14 @@ class MessageGuard:
                 duration = self._stair_duration(count, kw_settings)
             else:
                 duration = self._stair_duration(count, gconf)
-            if duration > 0:
+            gid_int = self._to_int_id(group_id)
+            uid_int = self._to_int_id(user_id)
+            if duration > 0 and gid_int is not None and uid_int is not None:
                 try:
                     await bot.api.call_action(
                         "set_group_ban",
-                        group_id=int(group_id),
-                        user_id=int(user_id),
+                        group_id=gid_int,
+                        user_id=uid_int,
                         duration=duration,
                     )
                     logger.info(
@@ -348,10 +350,11 @@ class MessageGuard:
                     logger.warning(f"[MessageGuard] 禁言失败: {exc}。请确认 Bot 具有管理员权限。")
 
         notice = str(gconf.get("guard_notice") or "").strip()
-        if notice:
+        notice_gid = self._to_int_id(group_id)
+        if notice and notice_gid is not None:
             try:
                 await bot.send_group_msg(
-                    group_id=int(group_id),
+                    group_id=notice_gid,
                     message=notice.replace("{user_id}", user_id)
                     .replace("{duration}", str(duration))
                     .replace("{count}", str(count)),
