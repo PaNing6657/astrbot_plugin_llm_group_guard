@@ -86,6 +86,14 @@ _✨ 全体禁言（即时/定时） + LLM 违规消息自动审核 ✨_
 
 豁免机制：AstrBot 管理员、群主/群管理员、`user_whitelist` 中的用户不审核；`guard_interval` 控制同一成员审核间隔（**设为 0 关闭节流**，每条消息都审核；默认 30 秒防刷屏造成大量调用）。
 
+## 🔤 _关键词检测（独立机制）_
+
+关键词检测**完全独立于 LLM 审核**：无需配置模型、不消耗 LLM 调用，命中即按自身设置处置，且与 LLM 审核互不计数、互不干扰。分两级：
+
+- **轻度违规词**（`keyword_minor_list`）：处置方式 `keyword_minor_action`（默认撤回）+ 阶梯禁言（`keyword_minor_ban_seconds` / 基础 300 秒、`keyword_minor_stair_multiplier`、封顶默认 1 小时），计数独立累计
+- **重度违规词**（`keyword_major_list`）：处置方式 `keyword_major_action`（默认撤回并禁言）+ 阶梯禁言（基础 3600 秒、封顶默认 1 天），计数独立累计
+- 同一消息同时命中轻/重时按**重度**处置；违规记录页按 LLM / 轻度词 / 重度词三来源展示与清零
+
 ## 📌 _自定义通知_
 
 - `whole_ban_enable_msg` / `whole_ban_disable_msg`：开启/解除全体禁言时发送的消息，支持 `{start_time}`、`{end_time}` 占位符，留空不发送

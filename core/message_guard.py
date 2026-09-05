@@ -20,7 +20,13 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 )
 
 from .llm_reviewer import LLMReviewer
-from .violation_tracker import KEYWORD_COUNTS_FILE, ViolationLog, ViolationTracker
+from .violation_tracker import (
+    KEYWORD_MAJOR_COUNTS_FILE,
+    KEYWORD_MINOR_COUNTS_FILE,
+    KEYWORD_COUNTS_FILE,
+    ViolationLog,
+    ViolationTracker,
+)
 
 
 class MessageGuard:
@@ -30,7 +36,14 @@ class MessageGuard:
         # 按群取配置的回调（由插件传入 _gconf），缺省回退到顶层 config
         self._gconf_provider = gconf_provider
         self.violation_tracker = ViolationTracker(data_dir, logger) if data_dir else None
-        # 关键词违规独立计数，与 LLM 违规分开累计
+        # 关键词违规计数：轻/重两级各自独立累计（另留旧文件兼容读取）
+        self.keyword_minor_tracker = (
+            ViolationTracker(data_dir, logger, filename=KEYWORD_MINOR_COUNTS_FILE) if data_dir else None
+        )
+        self.keyword_major_tracker = (
+            ViolationTracker(data_dir, logger, filename=KEYWORD_MAJOR_COUNTS_FILE) if data_dir else None
+        )
+        # 旧版统一关键词计数（升级时轻/重计数为空则并入轻度，避免阶梯清零）
         self.keyword_tracker = (
             ViolationTracker(data_dir, logger, filename=KEYWORD_COUNTS_FILE) if data_dir else None
         )
@@ -40,6 +53,21 @@ class MessageGuard:
         self._sem = asyncio.Semaphore(2)  # 限制 LLM 审核并发
         # 最近已完整审过的消息键（预审与后台共用，防止同一消息被处理两次）
         self._handled: list[str] = []
+        # 旧版统一关键词计数并入轻度（仅当轻/重计数均为空时执行一次）
+        self._merge_legacy_keyword_counts()
+
+    def _merge_legacy_keyword_counts(self) -> None:
+        """升级兼容：旧 keyword_counts.json 有数据且新轻/重计数为空时，并入轻度计数。"""
+        legacy = self.keyword_tracker
+        if legacy is None or not legacy.counts:
+            return
+        minor = self.keyword_minor_tracker
+        major = self.keyword_major_tracker
+        if (minor and minor.counts) or (major and major.counts):
+            return
+        if minor is not None:
+            minor.counts = legacy.counts
+            minor.save()
 
     def schedule(self, event: AiocqhttpMessageEvent) -> None:
         """后台执行审核，不阻塞消息事件处理。"""
@@ -83,13 +111,24 @@ class MessageGuard:
     def _whitelisted(self, user_id: str, gconf: dict) -> bool:
         return user_id in {str(u).strip() for u in gconf.get("user_whitelist", []) if str(u).strip()}
 
-    def _match_keyword(self, text: str, gconf: dict) -> Optional[str]:
+    def _match_keyword(self, text: str, words) -> Optional[str]:
         """返回消息命中的第一个关键词，未命中返回 None。"""
-        for kw in gconf.get("keyword_list") or []:
+        for kw in words or []:
             kw = str(kw).strip()
             if kw and kw in text:
                 return kw
         return None
+
+    @staticmethod
+    def _kw_settings(gconf: dict, level: str) -> dict:
+        """取轻/重级关键词的处置与阶梯设置（与 LLM 审核互不影响）。"""
+        return {
+            "action": (gconf.get(f"keyword_{level}_action") or "ban").lower(),
+            "ban_seconds": str(gconf.get(f"keyword_{level}_ban_seconds") or "600"),
+            "stair_enable": gconf.get(f"keyword_{level}_stair_enable", True),
+            "stair_multiplier": int(gconf.get(f"keyword_{level}_stair_multiplier") or 2),
+            "stair_max": int(gconf.get(f"keyword_{level}_stair_max_seconds") or 86400),
+        }
 
     @staticmethod
     def _extract_image_urls(event: AiocqhttpMessageEvent) -> list:
@@ -135,12 +174,17 @@ class MessageGuard:
         # 违规日志用的展示文本：纯图消息记占位，避免空记录
         log_text = text if text else f"[图片消息 x{len(image_urls)}]"
 
-        # 关键词检测：独立开关，本地匹配无成本不节流；命中即处置并结束
+        # 关键词检测：独立于 LLM 审核的完整机制（轻/重两级各自处置与阶梯，命中即结束）
         if gconf.get("keyword_guard_enable"):
-            keyword = self._match_keyword(text, gconf)
-            if keyword:
+            # 重度优先：同一消息同时命中轻/重时按重度处置
+            major_kw = self._match_keyword(text, gconf.get("keyword_major_list"))
+            minor_kw = None if major_kw else self._match_keyword(text, gconf.get("keyword_minor_list"))
+            if major_kw or minor_kw:
+                level = "major" if major_kw else "minor"
+                kw = major_kw or minor_kw
                 logger.info(
-                    f"[MessageGuard] 群 {group_id} 成员 {user_id} 命中关键词 {keyword!r}，按违规处置"
+                    f"[MessageGuard] 群 {group_id} 成员 {user_id} 命中{'重度' if major_kw else '轻度'}"
+                    f"违规词 {kw!r}，按对应处置执行"
                 )
                 message_id = getattr(event.message_obj, "message_id", None)
                 await self._apply_action(
@@ -148,11 +192,11 @@ class MessageGuard:
                     group_id,
                     user_id,
                     message_id,
-                    text,
-                    reason=f"触发关键词：{keyword}",
-                    tracker=self.keyword_tracker,
-                    source="keyword",
-                    gconf=gconf,
+                    log_text,
+                    reason=f"触发{'重度' if major_kw else '轻度'}违规词：{kw}",
+                    tracker=self.keyword_major_tracker if major_kw else self.keyword_minor_tracker,
+                    source=f"keyword_{level}",
+                    kw_settings=self._kw_settings(gconf, level),
                 )
                 self._mark_handled(key)
                 return True
@@ -232,12 +276,17 @@ class MessageGuard:
         tracker: Optional[ViolationTracker] = None,
         source: str = "llm",
         gconf: Optional[dict] = None,
+        kw_settings: Optional[dict] = None,
     ) -> None:
         gconf = gconf or (self._gconf_provider(group_id) if self._gconf_provider else self.config)
-        action = (gconf.get("guard_action") or "ban").lower()
+        # 关键词命中走独立处置设置（kw_settings）；LLM 违规走 guard_* 设置
+        if kw_settings is not None:
+            action = kw_settings["action"]
+        else:
+            action = (gconf.get("guard_action") or "ban").lower()
         bot = event.bot
 
-        # 阶梯计数：本次违规累计次数（LLM 与关键词各自独立计数）
+        # 阶梯计数：本次违规累计次数（LLM 与轻/重关键词各自独立计数）
         count = 1
         if tracker is not None:
             count = tracker.add(group_id, user_id)
@@ -262,7 +311,10 @@ class MessageGuard:
 
         duration = 0
         if do_ban:
-            duration = self._stair_duration(count, gconf)
+            if kw_settings is not None:
+                duration = self._stair_duration(count, kw_settings)
+            else:
+                duration = self._stair_duration(count, gconf)
             if duration > 0:
                 try:
                     await bot.api.call_action(
@@ -290,15 +342,25 @@ class MessageGuard:
             except Exception as exc:
                 logger.warning(f"[MessageGuard] 违规通知发送失败: {exc}")
 
-    def _stair_duration(self, count: int, gconf: dict) -> int:
-        """阶梯禁言时长：第 N 次违规 = 基础时长 × 倍数^(N-1)，封顶。"""
-        base = self._parse_duration(str(gconf.get("guard_ban_seconds") or "600"))
+    def _stair_duration(self, count: int, settings: dict) -> int:
+        """阶梯禁言时长：第 N 次违规 = 基础时长 × 倍数^(N-1)，封顶。
+
+        settings 兼容两种来源：LLM 审核的群配置（guard_* 键）与关键词独立设置（kw_settings）。
+        """
+        if "action" in settings:  # kw_settings（关键词独立设置）
+            base = self._parse_duration(settings["ban_seconds"])
+            stair_enable = settings["stair_enable"]
+            multiplier = settings["stair_multiplier"]
+            cap = settings["stair_max"]
+        else:  # 群配置（LLM 审核 guard_* 键）
+            base = self._parse_duration(str(settings.get("guard_ban_seconds") or "600"))
+            stair_enable = settings.get("guard_stair_enable", True)
+            multiplier = int(settings.get("guard_stair_multiplier") or 2)
+            cap = int(settings.get("guard_stair_max_seconds") or 86400)
         if base <= 0:
             return 0
-        if not gconf.get("guard_stair_enable", True):
+        if not stair_enable:
             return base
-        multiplier = int(gconf.get("guard_stair_multiplier") or 2)
-        cap = int(gconf.get("guard_stair_max_seconds") or 86400)
         return min(base * (multiplier ** max(count - 1, 0)), cap)
 
     @staticmethod

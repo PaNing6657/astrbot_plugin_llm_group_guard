@@ -18,8 +18,19 @@ const GROUP_FIELDS = [
   { key: "guard_risk_as_violation", label: "风控拦截视为违规", type: "toggle" },
   { key: "guard_prompt", label: "审核要求（自定义）", type: "textarea", full: true, hint: "完全自定义审核提示词（无内置话术），写清本群禁止内容；留空则仅保留 JSON 输出约束" },
   { key: "guard_notice", label: "违规通知消息", type: "text", full: true, hint: "支持 {user_id} {duration} {count} 占位符，留空不发送" },
-  { key: "keyword_guard_enable", label: "关键词检测", type: "toggle", hint: "命中关键词即判违规，机制同 LLM 审核但独立计数" },
-  { key: "keyword_list", label: "违规关键词（逗号分隔）", type: "csv", full: true, hint: "消息包含任一关键词即判违规" },
+  { key: "keyword_guard_enable", label: "关键词检测", type: "toggle", hint: "轻/重两级违规词各自独立处置与阶梯禁言，与 LLM 审核互不影响" },
+  { key: "keyword_minor_list", label: "轻度违规词（逗号分隔）", type: "csv", full: true, hint: "命中轻度词按下方轻度处置执行" },
+  { key: "keyword_minor_action", label: "轻度处置方式", type: "select", options: ["ban", "recall", "recall_and_ban"], hint: "ban=禁言 recall=撤回 recall_and_ban=撤回并禁言" },
+  { key: "keyword_minor_ban_seconds", label: "轻度基础禁言（秒）", type: "text", hint: "阶梯第一档，支持 30-120 随机范围" },
+  { key: "keyword_minor_stair_enable", label: "轻度阶梯禁言", type: "toggle" },
+  { key: "keyword_minor_stair_multiplier", label: "轻度阶梯倍数", type: "number" },
+  { key: "keyword_minor_stair_max_seconds", label: "轻度禁言封顶（秒）", type: "number" },
+  { key: "keyword_major_list", label: "重度违规词（逗号分隔）", type: "csv", full: true, hint: "同时命中轻/重时按重度处置" },
+  { key: "keyword_major_action", label: "重度处置方式", type: "select", options: ["ban", "recall", "recall_and_ban"], hint: "ban=禁言 recall=撤回 recall_and_ban=撤回并禁言" },
+  { key: "keyword_major_ban_seconds", label: "重度基础禁言（秒）", type: "text", hint: "阶梯第一档，支持 30-120 随机范围" },
+  { key: "keyword_major_stair_enable", label: "重度阶梯禁言", type: "toggle" },
+  { key: "keyword_major_stair_multiplier", label: "重度阶梯倍数", type: "number" },
+  { key: "keyword_major_stair_max_seconds", label: "重度禁言封顶（秒）", type: "number" },
   { key: "user_whitelist", label: "用户白名单（逗号分隔）", type: "csv", full: true },
   { key: "whole_ban_enable_msg", label: "开启禁言通知", type: "text", full: true, hint: "支持 {start_time} {end_time}" },
   { key: "whole_ban_disable_msg", label: "解除禁言通知", type: "text", full: true },
@@ -215,21 +226,29 @@ function fmtLogTs(ts) {
   return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
+// 来源 -> 徽章展示（LLM / 轻度词 / 重度词）
+const SRC_BADGE = {
+  llm: '<span class="badge blue">LLM</span>',
+  keyword_minor: '<span class="badge green">轻度词</span>',
+  keyword_major: '<span class="badge red">重度词</span>',
+  keyword: '<span class="badge green">轻度词</span>', // 旧日志兼容
+};
+const srcBadge = (s) => SRC_BADGE[s] || '<span class="badge">其他</span>';
+
 function renderViolations(data) {
-  // 数据结构：{llm: {gid: {uid: count}}, keyword: {gid: {uid: count}}, log: [...]}
+  // 数据结构：{llm, keyword_minor, keyword_major: {gid: {uid: count}}, log: [...]}
   violationLog = (data.log || []).filter((e) => e.gid === currentGroup);
   const rows = [];
   const collect = (source, type) =>
     Object.entries((data[source] || {})[currentGroup] || {}).forEach(([uid, count]) => rows.push({ uid, count, type }));
   collect("llm", "llm");
-  collect("keyword", "keyword");
+  collect("keyword_minor", "keyword_minor");
+  collect("keyword_major", "keyword_major");
   const tbody = $("violationBody");
   $("violationEmpty").classList.toggle("hidden", rows.length > 0);
   tbody.innerHTML = "";
   rows.forEach(({ uid, count, type }) => {
-    const typeBadge = type === "keyword"
-      ? '<span class="badge green">关键词</span>'
-      : '<span class="badge blue">LLM</span>';
+    const typeBadge = srcBadge(type);
     const last = violationLog.find((e) => e.uid === uid && e.source === type);
     const lastText = last ? escapeHtml(last.text) : "—";
     const tr = document.createElement("tr");
@@ -267,9 +286,7 @@ function showViolationHistory(uid) {
   $("historyTitle").textContent = `违规记录 · 群 ${currentGroupName}（${currentGroup}） · 用户 ${uid}`;
   list.innerHTML = entries.length
     ? entries.map((e) => {
-        const src = e.source === "keyword"
-          ? '<span class="badge green">关键词</span>'
-          : '<span class="badge blue">LLM</span>';
+        const src = srcBadge(e.source);
         return (
           `<div class="history-item">` +
           `<div class="history-meta">${src}<span>${fmtLogTs(e.ts)}</span><span class="history-reason">${escapeHtml(e.reason)}</span></div>` +

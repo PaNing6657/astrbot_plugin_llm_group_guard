@@ -10,6 +10,8 @@ from typing import Dict, List
 
 VIOLATION_COUNTS_FILE = "violation_counts.json"
 KEYWORD_COUNTS_FILE = "keyword_counts.json"
+KEYWORD_MINOR_COUNTS_FILE = "keyword_minor_counts.json"
+KEYWORD_MAJOR_COUNTS_FILE = "keyword_major_counts.json"
 VIOLATION_LOG_FILE = "violation_log.json"
 
 

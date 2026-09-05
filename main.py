@@ -44,6 +44,20 @@ DEFAULT_GROUP_CONFIG = {
     "guard_prompt": "",
     "guard_notice": "",
     "keyword_guard_enable": False,
+    # 关键词检测完全独立于 LLM 审核：轻/重两级各自拥有处置方式与阶梯禁言设置
+    "keyword_list": [],  # 旧字段：兼容迁移为轻度违规词
+    "keyword_minor_list": [],  # 轻度违规词
+    "keyword_minor_action": "recall",  # 轻度处置：ban/recall/recall_and_ban
+    "keyword_minor_ban_seconds": "300",  # 轻度基础禁言时长（秒，支持 30-120 随机）
+    "keyword_minor_stair_enable": True,  # 轻度阶梯禁言开关
+    "keyword_minor_stair_multiplier": 2,  # 轻度阶梯倍数
+    "keyword_minor_stair_max_seconds": 3600,  # 轻度禁言封顶（秒）
+    "keyword_major_list": [],  # 重度违规词
+    "keyword_major_action": "ban",  # 重度处置
+    "keyword_major_ban_seconds": "3600",  # 重度基础禁言时长（秒）
+    "keyword_major_stair_enable": True,  # 重度阶梯禁言开关
+    "keyword_major_stair_multiplier": 2,  # 重度阶梯倍数
+    "keyword_major_stair_max_seconds": 86400,  # 重度禁言封顶（秒）
     "join_verify_enable": False,
     "join_welcome_msg": "欢迎 {nickname} 加入本群！OID：{oid}",
     "join_card_notify": True,
@@ -230,6 +244,7 @@ class LLMGroupGuardPlugin(Star):
                     if isinstance(gval, dict):
                         merged = dict(DEFAULT_GROUP_CONFIG)
                         merged.update({k: v for k, v in gval.items() if k in _GROUP_CONFIG_KEYS})
+                        self._migrate_legacy_keywords(merged)
                         groups[str(gid)] = merged
         else:
             # 旧扁平结构：自定义 LLM 配置已废弃（改用 AstrBot provider），仅迁移群级策略键
@@ -250,9 +265,18 @@ class LLMGroupGuardPlugin(Star):
             if self._group_template:
                 gconf.update({k: v for k, v in self._group_template.items() if k in _GROUP_CONFIG_KEYS})
                 self._group_template = {}
+            self._migrate_legacy_keywords(gconf)
             groups[gid] = gconf
             self._save_config()
         return gconf
+
+    @staticmethod
+    def _migrate_legacy_keywords(gconf: dict) -> None:
+        """旧 keyword_list 迁移为轻度违规词（仅当新两级列表为空时）。"""
+        legacy = gconf.get("keyword_list") or []
+        if legacy and not (gconf.get("keyword_minor_list") or gconf.get("keyword_major_list")):
+            gconf["keyword_minor_list"] = list(legacy)
+        gconf.pop("keyword_list", None)
 
     def _save_config(self):
         """把当前配置写回本地 JSON 文件（WebUI 保存配置时调用）。"""
@@ -265,29 +289,32 @@ class LLMGroupGuardPlugin(Star):
             raise
 
     async def web_violations(self):
-        # 返回 LLM/关键词计数与违规消息日志
+        # 返回 LLM/轻/重关键词计数与违规消息日志
         tracker = getattr(self.guard, "violation_tracker", None)
-        kw_tracker = getattr(self.guard, "keyword_tracker", None)
+        kw_minor = getattr(self.guard, "keyword_minor_tracker", None)
+        kw_major = getattr(self.guard, "keyword_major_tracker", None)
         vlog = getattr(self.guard, "violation_log", None)
         return json_response({
             "llm": tracker.counts if tracker else {},
-            "keyword": kw_tracker.counts if kw_tracker else {},
+            "keyword_minor": kw_minor.counts if kw_minor else {},
+            "keyword_major": kw_major.counts if kw_major else {},
             "log": vlog.entries if vlog else [],
         })
 
     async def web_violations_reset(self):
         payload = await request.json(default={})
         tracker = getattr(self.guard, "violation_tracker", None)
-        kw_tracker = getattr(self.guard, "keyword_tracker", None)
+        kw_minor = getattr(self.guard, "keyword_minor_tracker", None)
+        kw_major = getattr(self.guard, "keyword_major_tracker", None)
         vlog = getattr(self.guard, "violation_log", None)
-        if tracker is None and kw_tracker is None:
+        if tracker is None and kw_minor is None and kw_major is None:
             return error_response("违规计数模块未初始化")
         gid = str(payload.get("group_id") or "").strip()
         uid = str(payload.get("user_id") or "").strip()
-        # type 指定计数来源：llm/keyword，缺省两者都处理
+        # type 指定计数来源：llm/keyword_minor/keyword_major，缺省全部处理
         vtype = str(payload.get("type") or "").strip()
-        trackers = {"llm": [tracker], "keyword": [kw_tracker]}
-        targets = trackers.get(vtype) if vtype in trackers else [tracker, kw_tracker]
+        trackers = {"llm": [tracker], "keyword_minor": [kw_minor], "keyword_major": [kw_major]}
+        targets = trackers.get(vtype) if vtype in trackers else [tracker, kw_minor, kw_major]
         for t in targets:
             if t is None:
                 continue
@@ -310,7 +337,8 @@ class LLMGroupGuardPlugin(Star):
         return json_response({
             "reset": True,
             "llm": tracker.counts if tracker else {},
-            "keyword": kw_tracker.counts if kw_tracker else {},
+            "keyword_minor": kw_minor.counts if kw_minor else {},
+            "keyword_major": kw_major.counts if kw_major else {},
             "log": vlog.entries if vlog else [],
         })
 
