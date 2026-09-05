@@ -29,6 +29,16 @@ from .violation_tracker import (
 )
 
 
+def _safe_int(value, default: int) -> int:
+    """配置值容错转 int：支持 '1.1' 浮点字符串（取整）、None 回退默认；失败回退默认。"""
+    if value is None or value == "":
+        return default
+    try:
+        return int(float(str(value).strip()))
+    except (TypeError, ValueError):
+        return default
+
+
 class MessageGuard:
     def __init__(self, config: dict, reviewer: LLMReviewer, data_dir=None, gconf_provider=None):
         self.config = config
@@ -134,10 +144,10 @@ class MessageGuard:
             "action": (gconf.get(f"keyword_{level}_action") or "ban").lower(),
             "ban_seconds": str(gconf.get(f"keyword_{level}_ban_seconds") or "600"),
             "stair_enable": gconf.get(f"keyword_{level}_stair_enable", True),
-            "stair_multiplier": int(gconf.get(f"keyword_{level}_stair_multiplier") or 2),
-            "stair_max": int(gconf.get(f"keyword_{level}_stair_max_seconds") or 86400),
+            "stair_multiplier": _safe_int(gconf.get(f"keyword_{level}_stair_multiplier"), 2),
+            "stair_max": _safe_int(gconf.get(f"keyword_{level}_stair_max_seconds"), 86400),
             # 纯撤回模式下撤回达到阈值后自动禁言（0=关闭，永远只撤回）
-            "recall_ban_threshold": int(gconf.get(f"keyword_{level}_recall_ban_threshold") or 0),
+            "recall_ban_threshold": _safe_int(gconf.get(f"keyword_{level}_recall_ban_threshold"), 0),
         }
 
     @staticmethod
@@ -310,7 +320,7 @@ class MessageGuard:
         if kw_settings is not None:
             threshold = kw_settings["recall_ban_threshold"]
         else:
-            threshold = int(gconf.get("guard_recall_ban_threshold") or 0)
+            threshold = _safe_int(gconf.get("guard_recall_ban_threshold"), 0)
         do_ban = action in ("ban", "recall_and_ban")
         if action == "recall" and threshold > 0 and count >= threshold:
             do_ban = True
@@ -375,8 +385,8 @@ class MessageGuard:
         else:  # 群配置（LLM 审核 guard_* 键）
             base = self._parse_duration(str(settings.get("guard_ban_seconds") or "600"))
             stair_enable = settings.get("guard_stair_enable", True)
-            multiplier = int(settings.get("guard_stair_multiplier") or 2)
-            cap = int(settings.get("guard_stair_max_seconds") or 86400)
+            multiplier = _safe_int(settings.get("guard_stair_multiplier"), 2)
+            cap = _safe_int(settings.get("guard_stair_max_seconds"), 86400)
         if base <= 0:
             return 0
         if not stair_enable:
