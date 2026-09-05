@@ -37,6 +37,14 @@
         <h2>群配置</h2>
         <span class="page-note">LLM 使用 AstrBot 已配置的模型，修改后点击保存实时生效</span>
       </div>
+      <!-- 从其他群同步配置 -->
+      <div class="card copy-bar">
+        <label>从其他群同步配置</label>
+        <select id="copySource"></select>
+        <button class="btn ghost" id="copyConfig">同步到当前群</button>
+        <span class="toast" id="copyToast"></span>
+        <p class="hint">将所选群的配置整体覆盖到当前群（含模型选择、审核、关键词、入群审批等全部设置）</p>
+      </div>
       <div class="card" id="configForm"></div>
       <div class="actions">
         <button class="btn primary" id="saveConfig">保存配置</button>
@@ -173,6 +181,6 @@
 </div>
 
 <!-- module 脚本延迟执行，确保在 AstrBot 注入的 bridge SDK 之后运行 -->
-<script type="module" src="app.js?v=20260905"></script>
+<script type="module" src="app.js?v=20260905b"></script>
 </body>
 </html>

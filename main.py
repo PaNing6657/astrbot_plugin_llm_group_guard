@@ -52,12 +52,14 @@ DEFAULT_GROUP_CONFIG = {
     "keyword_minor_stair_enable": True,  # 轻度阶梯禁言开关
     "keyword_minor_stair_multiplier": 2,  # 轻度阶梯倍数
     "keyword_minor_stair_max_seconds": 3600,  # 轻度禁言封顶（秒）
+    "keyword_minor_recall_ban_threshold": 3,  # 轻度撤回 N 次后自动禁言（仅 recall 模式，0=关闭）
     "keyword_major_list": [],  # 重度违规词
     "keyword_major_action": "ban",  # 重度处置
     "keyword_major_ban_seconds": "3600",  # 重度基础禁言时长（秒）
     "keyword_major_stair_enable": True,  # 重度阶梯禁言开关
     "keyword_major_stair_multiplier": 2,  # 重度阶梯倍数
     "keyword_major_stair_max_seconds": 86400,  # 重度禁言封顶（秒）
+    "keyword_major_recall_ban_threshold": 3,  # 重度撤回 N 次后自动禁言（仅 recall 模式，0=关闭）
     "join_verify_enable": False,
     "join_welcome_msg": "欢迎 {nickname} 加入本群！OID：{oid}",
     "join_card_notify": True,
@@ -168,6 +170,7 @@ class LLMGroupGuardPlugin(Star):
         self.context.register_web_api(f"{base}/providers", self.web_providers, ["GET"], "AstrBot 已配置的聊天模型列表")
         self.context.register_web_api(f"{base}/config", self.web_get_config, ["GET"], "读取插件配置")
         self.context.register_web_api(f"{base}/config/save", self.web_save_config, ["POST"], "保存插件配置")
+        self.context.register_web_api(f"{base}/config/copy", self.web_config_copy, ["POST"], "从另一群同步配置")
         self.context.register_web_api(f"{base}/violations", self.web_violations, ["GET"], "违规记录列表")
         self.context.register_web_api(f"{base}/violations/reset", self.web_violations_reset, ["POST"], "清零违规记录")
         self.context.register_web_api(f"{base}/schedules", self.web_schedules, ["GET"], "定时禁言任务列表")
@@ -204,6 +207,33 @@ class LLMGroupGuardPlugin(Star):
             logger.error(f"WebUI 保存配置失败: {e}")
             return error_response(f"保存失败：{e}")
         return json_response({"saved": True})
+
+    async def web_config_copy(self):
+        """POST /config/copy：把 source 群的配置整体同步到 target 群（覆盖目标全部键）。"""
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象")
+        src = str(payload.get("source_group_id") or "").strip()
+        dst = str(payload.get("target_group_id") or "").strip()
+        if not src or not dst:
+            return error_response("缺少 source_group_id 或 target_group_id")
+        if src == dst:
+            return error_response("源群与目标群不能相同")
+        groups = self.config.setdefault("groups", {})
+        src_conf = groups.get(src)
+        if src_conf is None:
+            return error_response(f"源群 {src} 尚无配置，请先在源群完成设置")
+        try:
+            # 深拷贝后整体覆盖目标群（键集合以源群为准）
+            import copy as _copy
+
+            groups[dst] = _copy.deepcopy(src_conf)
+            self._save_config()
+        except Exception as e:
+            logger.error(f"[Guard] 同步群配置失败: {e}")
+            return error_response(f"同步失败：{e}")
+        logger.info(f"[Guard] 群配置已从 {src} 同步到 {dst}")
+        return json_response({"copied": True, "group": groups[dst]})
 
     def _apply_saved_config(self):
         """加载本地持久化配置；旧扁平结构自动迁移为 global/groups 两级结构。"""

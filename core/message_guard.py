@@ -128,6 +128,8 @@ class MessageGuard:
             "stair_enable": gconf.get(f"keyword_{level}_stair_enable", True),
             "stair_multiplier": int(gconf.get(f"keyword_{level}_stair_multiplier") or 2),
             "stair_max": int(gconf.get(f"keyword_{level}_stair_max_seconds") or 86400),
+            # 纯撤回模式下撤回达到阈值后自动禁言（0=关闭，永远只撤回）
+            "recall_ban_threshold": int(gconf.get(f"keyword_{level}_recall_ban_threshold") or 0),
         }
 
     @staticmethod
@@ -296,8 +298,11 @@ class MessageGuard:
         if self.violation_log is not None:
             self.violation_log.add(group_id, user_id, text, reason, source)
 
-        # 是否禁言：ban/recall_and_ban 直接禁言；纯撤回模式下撤回达到阈值后禁言
-        threshold = int(gconf.get("guard_recall_ban_threshold") or 0)
+        # 是否禁言：ban/recall_and_ban 直接禁言；纯撤回模式下按对应阈值达到次数后禁言
+        if kw_settings is not None:
+            threshold = kw_settings["recall_ban_threshold"]
+        else:
+            threshold = int(gconf.get("guard_recall_ban_threshold") or 0)
         do_ban = action in ("ban", "recall_and_ban")
         if action == "recall" and threshold > 0 and count >= threshold:
             do_ban = True

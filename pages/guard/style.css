@@ -67,6 +67,21 @@ body {
   padding: 6px 14px; border-radius: 20px;
 }
 
+/* ---------- 从其他群同步配置 ---------- */
+.copy-bar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 14px 22px; margin-bottom: 14px;
+}
+.copy-bar label { font-size: 12px; color: var(--text-dim); flex: none; }
+.copy-bar select {
+  background: var(--bg); border: 1px solid var(--border); color: var(--text);
+  border-radius: 8px; padding: 8px 12px; font-size: 13px; font-family: var(--mono);
+  outline: none; min-width: 220px; appearance: none; cursor: pointer;
+  transition: border-color .18s ease, box-shadow .18s ease;
+}
+.copy-bar select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-dim); }
+.copy-bar .hint { width: 100%; margin: 0; font-size: 11px; color: var(--text-faint); }
+
 /* ---------- 群选择弹窗 ---------- */
 .group-modal { width: 460px; }
 .group-item {

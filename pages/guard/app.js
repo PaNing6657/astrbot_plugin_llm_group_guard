@@ -25,12 +25,14 @@ const GROUP_FIELDS = [
   { key: "keyword_minor_stair_enable", label: "轻度阶梯禁言", type: "toggle" },
   { key: "keyword_minor_stair_multiplier", label: "轻度阶梯倍数", type: "number" },
   { key: "keyword_minor_stair_max_seconds", label: "轻度禁言封顶（秒）", type: "number" },
+  { key: "keyword_minor_recall_ban_threshold", label: "轻度撤回 N 次后禁言", type: "number", hint: "仅轻度处置为纯撤回时生效，0=关闭" },
   { key: "keyword_major_list", label: "重度违规词（逗号分隔）", type: "csv", full: true, hint: "同时命中轻/重时按重度处置" },
   { key: "keyword_major_action", label: "重度处置方式", type: "select", options: ["ban", "recall", "recall_and_ban"], hint: "ban=禁言 recall=撤回 recall_and_ban=撤回并禁言" },
   { key: "keyword_major_ban_seconds", label: "重度基础禁言（秒）", type: "text", hint: "阶梯第一档，支持 30-120 随机范围" },
   { key: "keyword_major_stair_enable", label: "重度阶梯禁言", type: "toggle" },
   { key: "keyword_major_stair_multiplier", label: "重度阶梯倍数", type: "number" },
   { key: "keyword_major_stair_max_seconds", label: "重度禁言封顶（秒）", type: "number" },
+  { key: "keyword_major_recall_ban_threshold", label: "重度撤回 N 次后禁言", type: "number", hint: "仅重度处置为纯撤回时生效，0=关闭" },
   { key: "user_whitelist", label: "用户白名单（逗号分隔）", type: "csv", full: true },
   { key: "whole_ban_enable_msg", label: "开启禁言通知", type: "text", full: true, hint: "支持 {start_time} {end_time}" },
   { key: "whole_ban_disable_msg", label: "解除禁言通知", type: "text", full: true },
@@ -126,6 +128,7 @@ async function selectGroup(gid, name) {
   $("groupModal").classList.remove("show");
   $("currentGroup").textContent = `${currentGroupName}（${currentGroup}）`;
   await loadConfig();
+  renderCopySource();
   loadSchedules();
   loadViolations();
   loadJoin();
@@ -187,6 +190,33 @@ function collectGroupConfig() {
   });
   return out;
 }
+
+/* ---------- 从其他群同步配置 ---------- */
+function renderCopySource() {
+  const sel = $("copySource");
+  // 候选源群：已知管理群中排除当前群（含尚未配置过的群）
+  const others = groups.filter((g) => String(g.group_id) !== String(currentGroup));
+  sel.innerHTML = others.length
+    ? others.map((g) =>
+        `<option value="${escapeHtml(String(g.group_id))}">${escapeHtml(g.group_name || g.group_id)}（${g.group_id}）</option>`
+      ).join("")
+    : '<option value="">（暂无其他可同步的群）</option>';
+}
+
+$("copyConfig").addEventListener("click", async () => {
+  const src = $("copySource").value;
+  if (!src) return toast("copyToast", "请选择要同步的源群", true);
+  const srcName = ($("copySource").selectedOptions[0] || {}).textContent || src;
+  if (!confirm(`确定用「${srcName}」的配置整体覆盖当前群「${currentGroupName}」的全部设置吗？\n此操作不可撤销`)) return;
+  try {
+    await api("config/copy", "POST", { source_group_id: src, target_group_id: currentGroup });
+    toast("copyToast", "已同步");
+    await loadConfig(); // 重新拉取当前群配置并渲染
+    loadJoin();
+  } catch (e) {
+    toast("copyToast", "同步失败：" + e, true);
+  }
+});
 
 async function loadConfig() {
   try {
