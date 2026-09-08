@@ -36,6 +36,12 @@ sys.modules["astrbot.api.web"] = web
 acqev = types.ModuleType("astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event")
 acqev.AiocqhttpMessageEvent = object
 sys.modules["astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event"] = acqev
+# core.star.star_tools stub
+coremod = types.ModuleType("astrbot.core.star")
+sys.modules["astrbot.core.star"] = coremod
+sttools = types.ModuleType("astrbot.core.star.star_tools")
+sttools.StarTools = type("StarTools", (), {"get_data_dir": staticmethod(lambda: "tmp")})
+sys.modules["astrbot.core.star.star_tools"] = sttools
 # core.whole_ban_scheduler / violation_tracker 无 astrbot 深层依赖，直接真实导入
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
