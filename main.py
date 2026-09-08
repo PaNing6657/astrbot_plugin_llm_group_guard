@@ -176,6 +176,9 @@ class LLMGroupGuardPlugin(Star):
         self.context.register_web_api(f"{base}/schedules", self.web_schedules, ["GET"], "定时禁言任务列表")
         self.context.register_web_api(f"{base}/schedules/set", self.web_schedule_set, ["POST"], "设置某群定时禁言")
         self.context.register_web_api(f"{base}/schedules/delete", self.web_schedule_delete, ["POST"], "删除某群定时禁言")
+        self.context.register_web_api(f"{base}/local-data", self.web_local_data, ["GET"], "本地持久化数据概览")
+        self.context.register_web_api(f"{base}/local-data/delete", self.web_local_data_delete, ["POST"], "删除指定群的全部本地数据")
+        self.context.register_web_api(f"{base}/local-data/clear", self.web_local_data_clear, ["POST"], "清空全部本地数据")
 
     async def web_get_config(self):
         # GET /config?group_id=X：返回全局配置 + 该群配置
@@ -432,6 +435,94 @@ class LLMGroupGuardPlugin(Star):
         if old.get("started"):
             await self._apply_scheduled(gid, old, enable=False)
         return json_response({"deleted": True})
+
+    # ------------------------------------------------------------------
+    # 本地持久化数据管理：查看/一键删除（含已解散群的残留配置与定时任务）
+    # ------------------------------------------------------------------
+    def _local_trackers(self) -> list:
+        """返回全部违规计数追踪器（LLM + 轻/重关键词）。"""
+        return [
+            getattr(self.guard, "violation_tracker", None),
+            getattr(self.guard, "keyword_minor_tracker", None),
+            getattr(self.guard, "keyword_major_tracker", None),
+        ]
+
+    def _local_data_index(self) -> dict:
+        """汇总本地各群数据概览：{gid: {config, schedule, violations, log}}。"""
+        index: dict[str, dict] = {}
+        for gid in (self.config.get("groups") or {}):
+            index.setdefault(str(gid), {}).setdefault("config", True)
+        for gid in self.scheduler.all():
+            index.setdefault(str(gid), {}).setdefault("schedule", True)
+        for t in self._local_trackers():
+            if t is None:
+                continue
+            for gid in t.counts:
+                index.setdefault(str(gid), {}).setdefault("violations", True)
+        vlog = getattr(self.guard, "violation_log", None)
+        if vlog is not None:
+            gids = {str(e.get("gid")) for e in vlog.entries if e.get("gid")}
+            for gid in gids:
+                index.setdefault(gid, {}).setdefault("log", True)
+        return index
+
+    async def web_local_data(self):
+        """GET /{base}/local-data：返回本地持久化的群数据概览。"""
+        return json_response({"groups": self._local_data_index()})
+
+    async def web_local_data_delete(self):
+        """POST /{base}/local-data/delete：删除指定群的全部本地数据（配置/任务/计数/日志）。"""
+        payload = await request.json(default={})
+        gid = str(payload.get("group_id") or "").strip()
+        if not gid:
+            return error_response("缺少 group_id")
+        try:
+            self._purge_group_data(gid)
+        except Exception as e:
+            logger.error(f"[Guard] 删除群 {gid} 本地数据失败: {e}")
+            return error_response(f"删除失败：{e}")
+        logger.info(f"[Guard] 已删除群 {gid} 的全部本地数据")
+        return json_response({"deleted": True, "groups": self._local_data_index()})
+
+    async def web_local_data_clear(self):
+        """POST /{base}/local-data/clear：清空全部本地持久化数据。"""
+        try:
+            for gid in list(self._local_data_index().keys()):
+                self._purge_group_data(gid)
+        except Exception as e:
+            logger.error(f"[Guard] 清空本地数据失败: {e}")
+            return error_response(f"清空失败：{e}")
+        logger.info("[Guard] 已清空全部本地持久化数据")
+        return json_response({"cleared": True, "groups": self._local_data_index()})
+
+    def _purge_group_data(self, gid: str) -> None:
+        """删除某群的全部本地数据：定时任务（含解除进行中禁言）、群配置、违规计数与日志。"""
+        gid = str(gid)
+        # 1. 定时任务：先尝试解除进行中的全体禁言，再移除任务并落盘
+        for task in list(self.scheduler.get(gid)):
+            if task.get("started"):
+                try:
+                    self._apply_scheduled(gid, task, enable=False)
+                except Exception as e:
+                    logger.warning(f"[Guard] 删除任务前解除禁言失败: 群 {gid}: {e}")
+        if self.scheduler.get(gid):
+            self.scheduler.remove(gid)
+        # 2. 群配置
+        groups = self.config.setdefault("groups", {})
+        if gid in groups:
+            groups.pop(gid, None)
+            self._save_config()
+        # 3. 违规计数与日志
+        for t in self._local_trackers():
+            if t is not None and gid in t.counts:
+                t.counts.pop(gid, None)
+                t.save()
+        vlog = getattr(self.guard, "violation_log", None)
+        if vlog is not None:
+            vlog.clear(gid)
+        # 4. 清理运行态缓存
+        self._group_runtime.pop(gid, None)
+        self._join_oid.pop(gid, None)
 
     # 权限开关每次实时读取该群配置，避免修改配置后需要重启插件才生效
     def _permission_verification(self, group_id) -> bool:

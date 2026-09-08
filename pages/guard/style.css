@@ -222,6 +222,7 @@ body {
 .badge.blue { color: var(--accent); border-color: rgba(43, 127, 255, .35); background: var(--accent-dim); }
 .badge.green { color: var(--ok); border-color: rgba(16, 185, 129, .35); background: rgba(16, 185, 129, .08); }
 .badge.red { color: var(--danger); border-color: rgba(229, 72, 77, .35); background: rgba(229, 72, 77, .08); }
+.badge.warn { color: var(--warn); border-color: rgba(232, 147, 12, .4); background: rgba(232, 147, 12, .1); }
 
 .empty { text-align: center; color: var(--text-faint); padding: 40px 0 24px; font-size: 13px; }
 .hidden { display: none !important; }

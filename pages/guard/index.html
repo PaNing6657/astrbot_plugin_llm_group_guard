@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>LLM 群守卫 · 管理台</title>
-<link rel="stylesheet" href="style.css?v=20260905">
+<link rel="stylesheet" href="style.css?v=20260908">
 </head>
 <body>
 <div class="shell">
@@ -28,6 +28,7 @@
     <button class="tab" data-tab="violations">违规记录</button>
     <button class="tab" data-tab="schedules">定时禁言</button>
     <button class="tab" data-tab="join">入群审批</button>
+    <button class="tab" data-tab="data">数据管理</button>
   </nav>
 
   <main>
@@ -153,6 +154,29 @@
         </div>
       </div>
     </section>
+
+    <!-- 数据管理 -->
+    <section class="page" id="page-data">
+      <div class="page-head">
+        <h2>数据管理</h2>
+        <div class="head-actions">
+          <button class="btn ghost danger" id="clearAllData">清空全部数据</button>
+        </div>
+      </div>
+      <div class="card">
+        <div class="page-note" style="margin-bottom:12px">本地持久化数据概览：删除已解散群或残留的配置 / 定时任务 / 违规记录（含进行中的定时禁言会先解除）</div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>群号</th><th>包含数据</th><th>操作</th></tr>
+            </thead>
+            <tbody id="localDataBody"></tbody>
+          </table>
+          <div class="empty" id="localDataEmpty">暂无本地持久化数据</div>
+        </div>
+        <div class="actions"><span class="toast" id="dataToast"></span></div>
+      </div>
+    </section>
   </main>
 </div>
 
@@ -181,6 +205,6 @@
 </div>
 
 <!-- module 脚本延迟执行，确保在 AstrBot 注入的 bridge SDK 之后运行 -->
-<script type="module" src="app.js?v=20260905c"></script>
+<script type="module" src="app.js?v=20260908"></script>
 </body>
 </html>

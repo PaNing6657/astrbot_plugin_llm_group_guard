@@ -78,7 +78,89 @@ document.querySelectorAll(".tab").forEach((btn) => {
     if (btn.dataset.tab === "violations") loadViolations();
     if (btn.dataset.tab === "schedules") loadSchedules();
     if (btn.dataset.tab === "join") loadJoin();
+    if (btn.dataset.tab === "data") loadLocalData();
   });
+});
+
+/* ---------- 数据管理：读取本地持久化数据，一键删除指定群或清空 ---------- */
+function localTypeBadges(types) {
+  const map = {
+    config: '<span class="badge blue">配置</span>',
+    schedule: '<span class="badge warn">定时任务</span>',
+    violations: '<span class="badge red">违规计数</span>',
+    log: '<span class="badge green">违规日志</span>',
+  };
+  return types.map((t) => map[t] || t).join(" ");
+}
+
+function renderLocalData(data) {
+  // 数据结构：{groups: {gid: {config/schedule/violations/log: true}}}
+  const rows = Object.entries(data.groups || {});
+  $("localDataEmpty").classList.toggle("hidden", rows.length > 0);
+  const tbody = $("localDataBody");
+  tbody.innerHTML = "";
+  rows.forEach(([gid, types]) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${escapeHtml(gid)}</td>` +
+      `<td>${localTypeBadges(Object.keys(types))}</td>` +
+      `<td><button class="btn ghost sm danger" data-g="${escapeHtml(gid)}">删除</button></td>`;
+    // 二次点击确认（沙箱 iframe 禁用 confirm）
+    const btn = tr.querySelector("button");
+    let armed = false;
+    btn.addEventListener("click", async () => {
+      if (!armed) {
+        armed = true;
+        btn.textContent = "再点一次确认";
+        btn.classList.add("primary");
+        setTimeout(() => {
+          armed = false;
+          btn.textContent = "删除";
+          btn.classList.remove("primary");
+        }, 3000);
+        return;
+      }
+      try {
+        const res = await api("local-data/delete", "POST", { group_id: gid });
+        toast("dataToast", "已删除该群数据");
+        renderLocalData(res);
+      } catch (e) {
+        toast("dataToast", "删除失败：" + e, true);
+      }
+    });
+    tbody.appendChild(tr);
+  });
+}
+
+async function loadLocalData() {
+  try {
+    renderLocalData(await api("local-data"));
+  } catch (e) {
+    toast("dataToast", "读取本地数据失败：" + e, true);
+  }
+}
+
+let clearArmed = false;
+$("clearAllData").addEventListener("click", async () => {
+  const btn = $("clearAllData");
+  if (!clearArmed) {
+    clearArmed = true;
+    btn.textContent = "再点一次确认清空";
+    setTimeout(() => {
+      clearArmed = false;
+      btn.textContent = "清空全部数据";
+    }, 3000);
+    return;
+  }
+  clearArmed = false;
+  btn.textContent = "清空全部数据";
+  try {
+    const res = await api("local-data/clear", "POST", {});
+    toast("dataToast", "已清空全部本地数据");
+    renderLocalData(res);
+  } catch (e) {
+    toast("dataToast", "清空失败：" + e, true);
+  }
 });
 
 /* ---------- 群选择 ---------- */
