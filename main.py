@@ -236,6 +236,7 @@ class LLMGroupGuardPlugin(Star):
         self.context.register_web_api(f"{base}/schedules", self.web_schedules, ["GET"], "定时禁言任务列表")
         self.context.register_web_api(f"{base}/schedules/set", self.web_schedule_set, ["POST"], "设置某群定时禁言")
         self.context.register_web_api(f"{base}/schedules/delete", self.web_schedule_delete, ["POST"], "删除某群定时禁言")
+        self.context.register_web_api(f"{base}/high-recall/set", self.web_high_recall_set, ["POST"], "手动切换高召回模式")
         self.context.register_web_api(f"{base}/local-data", self.web_local_data, ["GET"], "本地持久化数据概览")
         self.context.register_web_api(f"{base}/local-data/delete", self.web_local_data_delete, ["POST"], "删除指定群的全部本地数据")
         self.context.register_web_api(f"{base}/local-data/clear", self.web_local_data_clear, ["POST"], "清空全部本地数据")

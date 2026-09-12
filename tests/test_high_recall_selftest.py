@@ -234,6 +234,19 @@ async def case_plugin_schedule_and_notice():
     assert "关闭" in sent[-1][1], sent
     print("[ok] 手动临时状态到期后由定时规则接管")
 
+    # WebAPI 注册：手动切换接口必须注册到路由（防止只写方法忘记注册）
+    class _Ctx:
+        def __init__(self):
+            self.routes = []
+
+        def register_web_api(self, path, handler, methods, desc):
+            self.routes.append(path)
+
+    plugin.context = _Ctx()
+    plugin._register_web_apis()
+    assert any(str(p).endswith("/high-recall/set") for p in plugin.context.routes), plugin.context.routes
+    print("[ok] 高召回手动切换 WebAPI 已注册")
+
     # WebUI 保存：开关打开时校验时间；开启 / 关闭时状态立即对齐
     main_mod.json_response = lambda obj=None: ("ok", obj)
     main_mod.error_response = lambda msg=None: ("err", msg)

@@ -215,6 +215,7 @@ async function selectGroup(gid, name) {
   loadSchedules();
   loadViolations();
   loadJoin();
+  loadHighRecall();
 }
 
 $("switchGroup").addEventListener("click", () => openGroupPicker(false));
