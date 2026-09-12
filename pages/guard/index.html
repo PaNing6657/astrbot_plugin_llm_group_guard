@@ -54,6 +54,81 @@
       </div>
     </section>
 
+    <!-- 高召回模式 -->
+    <section class="page" id="page-hr">
+      <div class="page-head">
+        <h2>高召回模式</h2>
+        <span class="page-note">到点自动启用另一套更严格的审核规则与模型，开启 / 关闭时可在群内发送提示</span>
+      </div>
+      <div class="card">
+        <div class="hr-status">
+          <span>当前状态</span>
+          <span class="badge" id="hrState">未生效</span>
+          <span id="hrStateHint"></span>
+        </div>
+
+        <div class="toggle-row" style="margin: 14px 0;">
+          <div>
+            <div class="t-label">每日定时开启高召回</div>
+            <div class="t-hint">按下方时间每天自动开启与关闭；关闭定时开关时若正在生效会自动关闭并发送提示，之后仍可用下方按钮手动切换</div>
+          </div>
+          <div class="toggle" id="hrEnableToggle" data-key="high_recall_enable"></div>
+        </div>
+
+        <div class="field">
+          <label>每日开启时间（HH:MM）</label>
+          <input id="hrStart" placeholder="如 22:00">
+        </div>
+
+        <div class="field" style="margin-top: 16px;">
+          <label>每日关闭时间（HH:MM）</label>
+          <input id="hrEnd" placeholder="如 06:00（早于开启时间视为次日）">
+        </div>
+
+        <div class="field" style="margin-top: 16px;">
+          <label>高召回审核模型（主）</label>
+          <select id="hrLlmChat"></select>
+          <p class="hint">生效期间替换常规审核主模型，可单独选择更强 / 更严格的模型；留空或沿用则使用配置页的主模型</p>
+        </div>
+
+        <div class="field" style="margin-top: 16px;">
+          <label>高召回审核模型（备用）</label>
+          <select id="hrLlmFallback"></select>
+          <p class="hint">高召回主模型技术性失败（请求错误/空输出/解析失败）时自动切换；留空或沿用则使用配置页的备用模型</p>
+        </div>
+
+        <div class="field" style="margin-top: 16px;">
+          <label>高召回识图模型（识图）</label>
+          <select id="hrLlmOcr"></select>
+          <p class="hint">高召回审核模型不识图且消息含图片时，由该识图模型直接带图审核；留空或沿用则使用配置页的识图模型</p>
+        </div>
+
+        <div class="field" style="margin-top: 16px;">
+          <label>高召回审核要求（另一个审核规则）</label>
+          <textarea id="hrPrompt" placeholder="例如：执行最高强度审核——只要存在任何疑似违规（擦边暗示、引战、广告变体、隐晦暗号、拉群引流等）一律判定违规；不确定时倾向判定违规"></textarea>
+          <p class="hint">生效期间替换配置页的审核要求，达到高召回效果；留空则沿用配置页的审核要求</p>
+        </div>
+
+        <div class="field" style="margin-top: 16px;">
+          <label>开启提示（发送到群里）</label>
+          <input id="hrOnMsg" placeholder="留空不发送，支持 {start_time} {end_time}">
+        </div>
+
+        <div class="field" style="margin-top: 16px;">
+          <label>关闭提示（发送到群里）</label>
+          <input id="hrOffMsg" placeholder="留空不发送，支持 {start_time} {end_time}">
+          <p class="hint">{start_time} / {end_time} 为定时设置的开 / 关时间（未设置时为空）；提示发送失败会在连接恢复后自动补发</p>
+        </div>
+
+        <div class="actions">
+          <button class="btn primary" id="saveHr">保存高召回设置</button>
+          <button class="btn ghost" id="hrManualOn">立即开启</button>
+          <button class="btn ghost" id="hrManualOff">立即关闭</button>
+          <span class="toast" id="hrToast"></span>
+        </div>
+      </div>
+    </section>
+
     <!-- 违规记录 -->
     <section class="page" id="page-violations">
       <div class="page-head">

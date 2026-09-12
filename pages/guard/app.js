@@ -570,9 +570,9 @@ async function loadJoin() {
   bindToggle($("joinVerifyToggle"), g.join_verify_enable);
   bindToggle($("joinAutoRejectToggle"), g.join_auto_reject_enable !== false);
   bindToggle($("joinCardNotifyToggle"), g.join_card_notify);
-  fillJoinModelSelect($("joinLlmChat"), g.join_llm_chat || "", "（沿用群消息审核模型）");
-  fillJoinModelSelect($("joinLlmFallback"), g.join_llm_chat_fallback || "", "（沿用消息审核备用模型）");
-  fillJoinModelSelect($("joinLlmOcr"), g.join_llm_ocr_chat || "", "（沿用消息审核识图模型）");
+  fillModelSelect($("joinLlmChat"), g.join_llm_chat || "", "（沿用群消息审核模型）");
+  fillModelSelect($("joinLlmFallback"), g.join_llm_chat_fallback || "", "（沿用消息审核备用模型）");
+  fillModelSelect($("joinLlmOcr"), g.join_llm_ocr_chat || "", "（沿用消息审核识图模型）");
   $("joinPrompt").value = g.join_prompt || "";
   $("joinRejectReply").value = g.join_reject_reply || "";
   $("joinRejectNotice").value = g.join_reject_notice || "";
