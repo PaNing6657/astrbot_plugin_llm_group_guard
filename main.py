@@ -23,6 +23,7 @@ from .core.whole_ban_scheduler import (
 )
 from .core.llm_reviewer import LLMReviewer
 from .core.message_guard import MessageGuard
+from .core.text_utils import build_text_with_at
 
 PLUGIN_NAME = "astrbot_plugin_llm_group_guard"
 CHECK_INTERVAL = 20  # 定时禁言调度循环检查间隔（秒）
@@ -47,7 +48,7 @@ DEFAULT_GROUP_CONFIG = {
     "guard_interval": 30,
     "guard_risk_as_violation": True,
     "guard_prompt": "",
-    "guard_notice": "",
+    "guard_notice": "",  # 违规通知，支持 {at_user} {nickname} {user_id} {duration} {count}，留空不发送
     "keyword_guard_enable": False,
     # 关键词检测完全独立于 LLM 审核：轻/重两级各自拥有处置方式与阶梯禁言设置
     "keyword_list": [],  # 旧字段：兼容迁移为轻度违规词
@@ -1100,11 +1101,11 @@ class LLMGroupGuardPlugin(Star):
 
     @staticmethod
     def _build_text_with_at(template: str, vars_map: dict, user_id: str) -> str:
-        """把模板编译为文本：{at_user} 替换成 CQ 码 @ 该用户（可多次出现）。"""
-        text = str(template)
-        for k, v in vars_map.items():
-            text = text.replace(k, str(v))
-        return text.replace("{at_user}", f"[CQ:at,qq={user_id}]")
+        """把模板编译为文本：{at_user} 替换成 CQ 码 @ 该用户（可多次出现）。
+
+        与违规通知共用 core.text_utils.build_text_with_at，保证 @ 行为一致。
+        """
+        return build_text_with_at(template, vars_map, user_id)
 
     # ------------------------------------------------------------------
     # 群消息监听：AI回复范围控制 + 更新 bot 缓存 + @禁言指令 + LLM 违规审核

@@ -20,6 +20,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
 )
 
 from .llm_reviewer import LLMReviewer
+from .text_utils import build_text_with_at
 from .violation_tracker import (
     KEYWORD_MAJOR_COUNTS_FILE,
     KEYWORD_MINOR_COUNTS_FILE,
@@ -365,12 +366,35 @@ class MessageGuard:
             try:
                 await bot.send_group_msg(
                     group_id=notice_gid,
-                    message=notice.replace("{user_id}", user_id)
-                    .replace("{duration}", str(duration))
-                    .replace("{count}", str(count)),
+                    message=build_text_with_at(
+                        notice,
+                        {
+                            "{user_id}": user_id,
+                            "{nickname}": self._sender_nickname(event) or user_id,
+                            "{duration}": str(duration),
+                            "{count}": str(count),
+                        },
+                        user_id,
+                    ),
                 )
             except Exception as exc:
                 logger.warning(f"[MessageGuard] 违规通知发送失败: {exc}")
+
+    @staticmethod
+    def _sender_nickname(event: AiocqhttpMessageEvent) -> str:
+        """取违规发言者的昵称：优先 QQ 昵称，其次群名片；均取不到返回空串。"""
+        raw_message = getattr(event.message_obj, "raw_message", None)
+        if isinstance(raw_message, dict):
+            sender = raw_message.get("sender")
+            if isinstance(sender, dict):
+                for key in ("nickname", "card"):
+                    name = str(sender.get(key) or "").strip()
+                    if name:
+                        return name
+        try:
+            return str(event.get_sender_name() or "").strip()
+        except Exception:
+            return ""
 
     def _stair_duration(self, count: int, settings: dict) -> int:
         """阶梯禁言时长：第 N 次违规 = 基础时长 × 倍数^(N-1)，封顶。

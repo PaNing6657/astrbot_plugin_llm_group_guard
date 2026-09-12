@@ -17,7 +17,7 @@ const GROUP_FIELDS = [
   { key: "guard_interval", label: "审核间隔（秒）", type: "number", hint: "0=每条都审" },
   { key: "guard_risk_as_violation", label: "风控拦截视为违规", type: "toggle" },
   { key: "guard_prompt", label: "审核要求（自定义·群消息）", type: "textarea", full: true, hint: "完全自定义群消息审核提示词（无内置话术），写清本群禁止内容；留空则仅保留 JSON 输出约束。入群审批审核要求见「入群审批」页的独立自定义项" },
-  { key: "guard_notice", label: "违规通知消息", type: "text", full: true, hint: "支持 {user_id} {duration} {count} 占位符，留空不发送" },
+  { key: "guard_notice", label: "违规通知消息", type: "text", full: true, hint: "支持 {at_user}(@该违规成员，与入群欢迎同一套 @ 逻辑) {nickname} {user_id} {duration} {count}，留空不发送；手写 @{user_id} 会自动升级为真 @（不再只是纯文本 QQ 号）" },
   { key: "keyword_guard_enable", label: "关键词检测", type: "toggle", hint: "轻/重两级违规词各自独立处置与阶梯禁言，与 LLM 审核互不影响" },
   { key: "keyword_minor_list", label: "轻度违规词（逗号分隔）", type: "csv", full: true, hint: "命中轻度词按下方轻度处置执行" },
   { key: "keyword_minor_action", label: "轻度处置方式", type: "select", options: ["ban", "recall", "recall_and_ban"], hint: "ban=禁言 recall=撤回 recall_and_ban=撤回并禁言" },
