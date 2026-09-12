@@ -293,15 +293,15 @@ class MessageGuard:
 
         verdict = await self.reviewer.judge_message(
             user_id, text,
-            prompt=gconf.get("guard_prompt") or "",
-            chat_id=gconf.get("llm_chat") or "",
-            fallback_chat_id=gconf.get("llm_chat_fallback") or "",
+            prompt=settings["prompt"],
+            chat_id=settings["chat_id"],
+            fallback_chat_id=settings["fallback_chat_id"],
             image_urls=image_urls,
-            ocr_chat_id=gconf.get("llm_ocr_chat") or "",
+            ocr_chat_id=settings["ocr_chat_id"],
         )
         if verdict is None:
             logger.warning(
-                f"[MessageGuard] LLM 审核无结果，保守跳过: 群 {group_id} 用户 {user_id}。"
+                f"[MessageGuard] LLM 审核无结果，保守跳过{mode_note}: 群 {group_id} 用户 {user_id}。"
                 f"原因：{self.reviewer.last_error or '未知'}"
             )
             return False
