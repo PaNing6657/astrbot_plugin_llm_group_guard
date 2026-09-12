@@ -88,10 +88,15 @@ class MessageGuard:
             logger.error(f"[MessageGuard] 无法创建审核任务（不在事件循环中）: {exc}")
 
     async def pre_review(self, event: AiocqhttpMessageEvent) -> bool:
-        """AI 会话回复前的先审：返回 True 表示消息违规（应拦截该次回复）。"""
+        """AI 会话回复前的先审：返回 True 表示消息违规（应拦截该次回复）。
+
+        preview 模式：命中关键词只判定、不执行撤回/禁言（后台任务负责处置）。
+        预审不做去重跳过：与后台审核的先后顺序不确定，若因去重返回 False，
+        stop_event 不会被调用，机器人就会照常回复命中关键词的消息。
+        """
         try:
             async with self._sem:
-                return await self._handle(event)
+                return await self._handle(event, preview=True)
         except Exception as exc:
             logger.error(f"[MessageGuard] 预审异常: {exc}")
             return False
@@ -168,8 +173,13 @@ class MessageGuard:
                     urls.append(u)
         return urls[:3]
 
-    async def _handle(self, event: AiocqhttpMessageEvent) -> bool:
-        """完整审核一条消息（关键字/LLM+处置），返回 True 表示违规（应拦截回复）。"""
+    async def _handle(self, event: AiocqhttpMessageEvent, preview: bool = False) -> bool:
+        """完整审核一条消息（关键字/LLM+处置），返回 True 表示违规（应拦截回复）。
+
+        preview=True 为回复前预审：只检测轻/重违规词，命中即返回 True 供调用方
+        stop_event 拦截回复，由后台审核任务负责撤回/禁言与计数；预审期间不去重、
+        不标记已处理，避免与后台任务互相抢先导致关键词命中时回复照样发出。
+        """
         text = (event.message_str or "").strip()
         image_urls = self._extract_image_urls(event)
         if (not text and not image_urls) or text.startswith("/"):
@@ -179,7 +189,7 @@ class MessageGuard:
         if not group_id or not user_id:
             return False
         key = self._msg_key(event)
-        if self._is_handled(key):
+        if not preview and self._is_handled(key):
             return False  # 该消息已被预审/后台完整处理过，跳过（去重）
         # 每群独立配置：由插件按群惰性创建并补齐默认值
         gconf = self._gconf_provider(group_id) if self._gconf_provider else self.config
@@ -203,6 +213,14 @@ class MessageGuard:
             if major_kw or minor_kw:
                 level = "major" if major_kw else "minor"
                 kw = major_kw or minor_kw
+                if preview:
+                    # 预审只负责"不回复"：命中即返回 True，处置交给后台审核任务，
+                    # 避免与后台任务重复撤回/重复计数
+                    logger.info(
+                        f"[MessageGuard] 群 {group_id} 成员 {user_id} 预审命中"
+                        f"{'重度' if major_kw else '轻度'}违规词 {kw!r}，拦截本次回复"
+                    )
+                    return True
                 logger.info(
                     f"[MessageGuard] 群 {group_id} 成员 {user_id} 命中{'重度' if major_kw else '轻度'}"
                     f"违规词 {kw!r}，按对应处置执行"
@@ -221,6 +239,9 @@ class MessageGuard:
                 )
                 self._mark_handled(key)
                 return True
+
+        if preview:
+            return False  # 预审只做关键词拦截，LLM 审核仍由后台任务完整执行
 
         # LLM 审核：独立开关，与关键词检测互不影响
         if not gconf.get("guard_enable"):
