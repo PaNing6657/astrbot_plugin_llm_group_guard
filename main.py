@@ -15,7 +15,12 @@ from astrbot.core.star.star_tools import StarTools
 
 from .core.event_utils import unwrap_event
 from .core.permission_utils import check_group_and_permission
-from .core.whole_ban_scheduler import WholeBanScheduler, parse_schedule_times, weekly_window
+from .core.whole_ban_scheduler import (
+    ScheduleConflictError,
+    WholeBanScheduler,
+    parse_schedule_times,
+    weekly_window,
+)
 from .core.llm_reviewer import LLMReviewer
 from .core.message_guard import MessageGuard
 
@@ -407,15 +412,25 @@ class LLMGroupGuardPlugin(Star):
                 rules = dict(old_weekly.get("rules") or {}) if old_weekly else {}
                 for d in weekday_set:
                     rules[str(d)] = rule
+                # 冲突预检查：先于解除旧任务，避免产生副作用
+                conflicts = self.scheduler.check_candidate(
+                    gid, {"mode": "weekly", "rules": rules}, exclude_id=(old_weekly or {}).get("id")
+                )
+                if conflicts:
+                    return error_response(self._conflict_text(gid, conflicts))
+                if old_weekly and old_weekly.get("started"):
+                    await self._apply_scheduled(gid, old_weekly, enable=False)
                 self.scheduler.set_weekly(gid, rules, bot=bot)
                 return json_response({"saved": True})
             recurring = mode == "daily"
             if recurring and start_str.lower() == "now":
                 return error_response("每日任务需要 HH:MM 开始时间")
             start_ts, end_ts = parse_schedule_times(start_str, end_str)
-            # 追加新任务：同类型未触发自动去重，不影响已有规划
+            # 追加新任务：与已有任务时间重叠时报错，由用户删除其一
             self.scheduler.set(gid, start_ts, end_ts, bot=bot, recurring=recurring)
             return json_response({"saved": True})
+        except ScheduleConflictError as e:
+            return error_response(self._conflict_text(gid, e.conflicts))
         except ValueError as e:
             return error_response(f"时间格式错误：{e}")
         except Exception as e:
@@ -1407,9 +1422,12 @@ class LLMGroupGuardPlugin(Star):
                 return event.plain_result(f"时间格式错误：{e}\n用法：/定时禁言 10:00 20:00 或 /定时禁言 每天 22:00 06:00")
 
             recurring = weekday_set == "all"
-            self.scheduler.set(
-                str(group_id), start_ts, end_ts, bot=event.bot, recurring=recurring
-            )
+            try:
+                self.scheduler.set(
+                    str(group_id), start_ts, end_ts, bot=event.bot, recurring=recurring
+                )
+            except ScheduleConflictError as e:
+                return event.plain_result(self._conflict_text(group_id, e.conflicts))
             start_txt = "立即" if start_str.strip().lower() == "now" else time.strftime(
                 "%H:%M", time.localtime(start_ts)
             )
@@ -1444,16 +1462,22 @@ class LLMGroupGuardPlugin(Star):
         old = next(
             (t for t in self.scheduler.get(str(group_id)) if t.get("mode") == "weekly"), None
         )
+        rules = dict(old.get("rules") or {}) if old else {}
+        rule = _to_weekly_rule(start_ts, end_ts)
+        for day in weekday_set:
+            rules[str(day)] = rule
+        # 冲突预检查：先于解除旧任务，避免产生副作用
+        conflicts = self.scheduler.check_candidate(
+            group_id, {"mode": "weekly", "rules": rules}, exclude_id=(old or {}).get("id")
+        )
+        if conflicts:
+            return event.plain_result(self._conflict_text(group_id, conflicts))
         if old and old.get("started"):
             # 正在执行禁言的周任务：规则更新后先解除本轮
             await self._apply_scheduled(group_id, old, enable=False)
             old["started"] = False
             old["current_end_ts"] = 0
 
-        rules = dict(old.get("rules") or {}) if old else {}
-        rule = _to_weekly_rule(start_ts, end_ts)
-        for day in weekday_set:
-            rules[str(day)] = rule
         self.scheduler.set_weekly(str(group_id), rules, bot=event.bot)
 
         days_txt = "、".join(_WEEKDAY_CN[d] for d in sorted(weekday_set))
@@ -1528,6 +1552,14 @@ class LLMGroupGuardPlugin(Star):
             f"→ {time.strftime('%m-%d %H:%M', time.localtime(sched['end_ts']))}（{status}）"
         )
 
+    def _conflict_text(self, group_id, conflicts: list) -> str:
+        """把冲突任务列表拼成可读文本，供 LLM/用户决定删除哪一个。"""
+        lines = ["⚠️ 新设定的定时禁言与已有任务时间冲突，同一时段只能保留一个任务："]
+        for i, t in enumerate(conflicts, 1):
+            lines.append(f"{i}. {self._describe_task(group_id, t)}")
+        lines.append("请先删除其中一个（发送 /定时禁言 取消 取消全部，或在 WebUI 定时禁言页删除）后再重新设置。")
+        return "\n".join(lines)
+
     async def _cancel_schedule(self, event: AstrMessageEvent, group_id) -> object:
         tasks = self.scheduler.get(str(group_id))
         if not tasks:
@@ -1554,6 +1586,8 @@ class LLMGroupGuardPlugin(Star):
         """
         定时全体禁言：为当前群聊设定一个时间段，到点自动开启全体禁言，时间到自动解除，全程无需人工干预。
         常用于：深夜/工作时段自动静音、考试或直播期间的临时全员禁言等场景。
+        若新时段与已有定时禁言时间重叠会返回 error 并列出冲突任务，此时需告知用户先删除其中一个再重新设置。
+        可先调用 list_group_ban_schedules 查询本群已有定时禁言，避免无谓冲突。
         Args:
             start_time(string): 开始时间。"now" 表示立即开启；或 "HH:MM" 格式（如 "22:00"），若该时间已过将顺延到明天。
             end_time(string): 结束时间。"HH:MM" 格式（如 "06:00"，早于开始时间视为次日凌晨）；或纯数字分钟数（如 "480"，表示从开始时间起持续480分钟）。
@@ -1587,14 +1621,20 @@ class LLMGroupGuardPlugin(Star):
                 old = next(
                     (t for t in self.scheduler.get(str(group_id)) if t.get("mode") == "weekly"), None
                 )
-                if old and old.get("started"):
-                    await self._apply_scheduled(group_id, old, enable=False)
-                    old["started"] = False
-                    old["current_end_ts"] = 0
                 rules = dict(old.get("rules") or {}) if old else {}
                 rule = _to_weekly_rule(start_ts, end_ts)
                 for day in weekday_set:
                     rules[str(day)] = rule
+                # 冲突预检查：先于解除旧任务，避免产生副作用
+                conflicts = self.scheduler.check_candidate(
+                    group_id, {"mode": "weekly", "rules": rules}, exclude_id=(old or {}).get("id")
+                )
+                if conflicts:
+                    return {"status": "error", "message": self._conflict_text(group_id, conflicts)}
+                if old and old.get("started"):
+                    await self._apply_scheduled(group_id, old, enable=False)
+                    old["started"] = False
+                    old["current_end_ts"] = 0
                 self.scheduler.set_weekly(str(group_id), rules, bot=event.bot)
                 days_txt = "、".join(_WEEKDAY_CN[d] for d in sorted(weekday_set))
                 reason_txt = f"，原因：{reason}" if reason else ""
@@ -1620,8 +1660,49 @@ class LLMGroupGuardPlugin(Star):
             msg = f"已设定{mode}定时全体禁言：{start_txt} 开启，{end_txt} 自动解除{reason_txt}"
             logger.info(f"群 {group_id} 设定{mode}定时全体禁言: {start_txt} -> {end_txt}")
             return {"status": "success", "message": msg}
+        except ScheduleConflictError as e:
+            return {"status": "error", "message": self._conflict_text(event.get_group_id(), e.conflicts)}
         except ValueError as e:
             return {"status": "error", "message": f"时间格式错误：{e}"}
         except Exception as e:
             logger.error(f"设定定时全体禁言失败: {e}")
             return {"status": "error", "message": "设定定时全体禁言失败，请稍后重试"}
+
+    @filter.llm_tool(name="list_group_ban_schedules")
+    async def list_group_ban_schedules(self, event: AiocqhttpMessageEvent) -> dict:
+        """
+        查询当前群聊已设置的定时全体禁言任务（单次/每日/每周）及其时间与状态。
+        在设置或取消定时禁言前调用本工具，可先了解已有任务，避免时间冲突或误删。
+        """
+        event = unwrap_event(event)
+        try:
+            group_id = event.get_group_id()
+            if not group_id:
+                return {"status": "error", "message": "此操作仅可在群聊中进行"}
+            tasks = self.scheduler.get(str(group_id))
+            if not tasks:
+                return {
+                    "status": "success",
+                    "count": 0,
+                    "schedules": [],
+                    "message": "本群当前没有定时全体禁言任务",
+                }
+            schedules = [
+                {
+                    "id": t.get("id"),
+                    "description": self._describe_task(group_id, t),
+                    "started": bool(t.get("started")),
+                }
+                for t in tasks
+            ]
+            lines = [f"本群共有 {len(schedules)} 个定时全体禁言任务："]
+            lines += [f"{i}. {s['description']}" for i, s in enumerate(schedules, 1)]
+            return {
+                "status": "success",
+                "count": len(schedules),
+                "schedules": schedules,
+                "message": "\n".join(lines),
+            }
+        except Exception as e:
+            logger.error(f"查询定时全体禁言任务失败: {e}")
+            return {"status": "error", "message": f"查询失败: {e}"}

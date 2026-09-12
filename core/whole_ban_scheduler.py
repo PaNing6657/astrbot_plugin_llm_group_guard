@@ -92,6 +92,80 @@ def _new_id() -> str:
     return uuid.uuid4().hex[:12]
 
 
+class ScheduleConflictError(Exception):
+    """定时禁言时间冲突：候选任务与已有任务存在重叠窗口。"""
+
+    def __init__(self, conflicts: List[dict]):
+        self.conflicts = conflicts
+        super().__init__("定时禁言时间与已有任务冲突")
+
+
+def _ranges_overlap(a: Tuple[float, float], b: Tuple[float, float]) -> bool:
+    """判断两个时间窗口是否重叠。"""
+    return a[0] < b[1] and b[0] < a[1]
+
+
+def expand_task_intervals(
+    task: dict, now: Optional[float] = None, horizon_days: int = MAX_INTERVAL_DAYS * 2
+) -> List[Tuple[float, float]]:
+    """把任务在 [now, now+horizon_days] 内展开为绝对时间窗口列表，用于冲突判断。"""
+    now = now if now is not None else time.time()
+    horizon_end = now + horizon_days * 86400
+    out: List[Tuple[float, float]] = []
+    if task.get("mode") == "weekly":
+        # 每周任务：逐天扫描未来若干天，按当日周几取规则
+        rules = task.get("rules") or {}
+        base = datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0)
+        for offset in range(horizon_days + 2):
+            day = base + timedelta(days=offset)
+            rule = rules.get(str(day.weekday() + 1))
+            if not rule:
+                continue
+            start = day.timestamp() + int(rule.get("start_min") or 0) * 60
+            end = start + int(rule.get("duration_min") or 0) * 60
+            if end > now and start < horizon_end:
+                out.append((start, end))
+        return out
+    start_ts = float(task.get("start_ts") or 0)
+    end_ts = float(task.get("end_ts") or 0)
+    if end_ts <= start_ts:
+        return out
+    if task.get("mode") == "daily" or task.get("recurring"):
+        # 每日任务：先跳到未结束的窗口，再逐天展开
+        s, e, guard = start_ts, end_ts, 0
+        while e <= now and guard < 400:
+            s += 86400
+            e += 86400
+            guard += 1
+        while s < horizon_end and guard < 800:
+            out.append((s, e))
+            s += 86400
+            e += 86400
+            guard += 1
+        return out
+    if end_ts > now:
+        out.append((start_ts, end_ts))
+    return out
+
+
+def find_task_conflicts(
+    tasks: List[dict], candidate: dict, now: Optional[float] = None
+) -> List[dict]:
+    """返回与候选任务时间窗口重叠的已有任务列表（candidate 自身不参与比较）。"""
+    cand = expand_task_intervals(candidate, now)
+    if not cand:
+        return []
+    conflicts = []
+    for t in tasks:
+        if not t or t is candidate:
+            continue
+        for rng in expand_task_intervals(t, now):
+            if any(_ranges_overlap(rng, c) for c in cand):
+                conflicts.append(t)
+                break
+    return conflicts
+
+
 class WholeBanScheduler:
     """管理各群的定时全体禁言任务，每群可共存多个，变更后立即持久化。"""
 
@@ -113,13 +187,19 @@ class WholeBanScheduler:
         """登记一个单次/每日任务（追加），返回新任务。
 
         recurring=True 表示每日重复（mode=daily）：窗口结束后自动推进到下一天，直到取消。
-        同类型未触发的旧任务会被替换，避免堆积；不影响其他类型任务（如每周规划）。
+        与已有任务时间窗口重叠时抛出 ScheduleConflictError，由调用方提示用户删除其一。
         """
         mode = "daily" if recurring else "once"
         tasks = self.schedules.setdefault(str(group_id), [])
-        # 移除同 mode 且尚未触发的旧任务，防止多次设置堆积
-        for old in [t for t in tasks if t.get("mode") == mode and not t.get("started")]:
-            tasks.remove(old)
+        candidate = {
+            "mode": mode,
+            "start_ts": start_ts,
+            "end_ts": end_ts,
+            "recurring": bool(recurring),
+        }
+        conflicts = find_task_conflicts(tasks, candidate)
+        if conflicts:
+            raise ScheduleConflictError(conflicts)
         sched = {
             "id": _new_id(),
             "mode": mode,
@@ -141,16 +221,23 @@ class WholeBanScheduler:
 
         rules: {str(weekday 1-7): {"start_min": 当日分钟数, "duration_min": 持续分钟数}}
         跨天窗口通过 duration 跨越自然实现（如 22:00 起 480 分钟 = 次日 06:00）。
+        与已有其他任务时间窗口重叠时抛出 ScheduleConflictError。
         """
         tasks = self.schedules.setdefault(str(group_id), [])
-        for t in tasks:
-            if t.get("mode") == "weekly":
-                t["rules"] = rules
-                t["bot"] = bot if bot is not None else t.get("bot")
-                t["started"] = False  # 规则更新后本轮窗口需重新触发
-                t["current_end_ts"] = 0
-                self.save()
-                return t
+        existing = next((t for t in tasks if t.get("mode") == "weekly"), None)
+        # 每周任务本身会被覆盖，比较时排除，只校验与单次/每日任务的冲突
+        conflicts = find_task_conflicts(
+            [t for t in tasks if t is not existing], {"mode": "weekly", "rules": rules}
+        )
+        if conflicts:
+            raise ScheduleConflictError(conflicts)
+        if existing:
+            existing["rules"] = rules
+            existing["bot"] = bot if bot is not None else existing.get("bot")
+            existing["started"] = False  # 规则更新后本轮窗口需重新触发
+            existing["current_end_ts"] = 0
+            self.save()
+            return existing
         sched = {
             "id": _new_id(),
             "mode": "weekly",
@@ -165,6 +252,13 @@ class WholeBanScheduler:
         tasks.append(sched)
         self.save()
         return sched
+
+    def check_candidate(
+        self, group_id, candidate: dict, exclude_id: Optional[str] = None
+    ) -> List[dict]:
+        """预检查候选任务与已有任务的冲突，不修改任何数据。"""
+        tasks = [t for t in self.get(group_id) if t.get("id") != exclude_id]
+        return find_task_conflicts(tasks, candidate)
 
     def remove(self, group_id, task_id: Optional[str] = None) -> Optional[dict]:
         """移除任务：task_id 为空则移除该群全部任务，否则仅移除指定任务。"""
