@@ -3,6 +3,8 @@
 
 - 每个群在 WebUI 选择 AstrBot 的聊天模型：主模型（llm_chat）、备用模型
   （llm_chat_fallback）、识图审核模型（llm_ocr_chat，需支持识图）
+- 入群审批可另选独立模型（join_llm_chat / join_llm_chat_fallback / join_llm_ocr_chat），
+  未选择时由调用方回退到消息审核模型；审批要求完全自定义（join_prompt）
 - 调用通过 self.context.llm_generate(chat_provider_id=..., prompt=..., contexts=...) 完成
 - 图片消息审核：审核模型识图（modalities 含 image）则直接带图审核；不识图时由
   识图审核模型直接带图出判定（不转述）。主模型技术性失败自动切备用模型，
@@ -34,8 +36,20 @@ _JSON_RULE = (
 
 _JOIN_JSON_RULE = (
     "你必须严格只输出一个 JSON 对象，不要输出任何无关文字、注释或 Markdown 代码块。"
-    '字段：{"has_nickname": true/false, "has_oid": true/false, "nickname": "申请信息中的昵称（无则为空字符串）", '
-    '"oid": "申请信息中的OID/UID值（无则为空字符串）", "comment": "简短中文说明信息是否完整或缺失了什么"}'
+    '字段：{"allowed": true/false（是否满足上述入群要求）, '
+    '"has_nickname": true/false（申请信息中是否含昵称）, '
+    '"has_oid": true/false（申请信息中是否含 OID/UID，即纯数字编号）, '
+    '"nickname": "申请信息中的昵称（无则为空字符串）", '
+    '"oid": "申请信息中的OID/UID值（无则为空字符串）", '
+    '"reason": "不满足要求时的简短中文原因（满足要求时可为空字符串）", '
+    '"comment": "简短中文说明信息是否完整或缺失了什么"}'
+)
+
+# 内置默认入群要求：join_prompt 留空时使用（非空时完全由用户自定义要求替换）
+_DEFAULT_JOIN_PROMPT = (
+    "你是入群申请审核助手。请检查申请人填写的入群验证信息："
+    "它必须同时包含【昵称】和【OID】（也称 UID，是一串纯数字编号，如 QQ 号、学号等，不含字母）。"
+    "信息模糊、可读性差或格式不符合要求时倾向保守判断。"
 )
 
 _RISK_KEYWORDS = (
@@ -275,35 +289,70 @@ class LLMReviewer:
         return result
 
     async def judge_join_request(
-        self, comment: str, chat_id: str = "", fallback_chat_id: str = ""
+        self,
+        comment: str,
+        prompt: str = "",
+        chat_id: str = "",
+        fallback_chat_id: str = "",
+        ocr_chat_id: str = "",
     ) -> Optional[dict]:
-        """判定入群申请信息是否同时包含【昵称】与【OID/UID】，返回结构化结果。
+        """判定入群申请信息是否满足入群要求，返回结构化结果。
 
-        chat_id 为该群选用的 AstrBot 聊天模型；失败返回 None（如未配置模型或调用失败），
-        由调用方保守处理。
+        prompt 为该群自定义入群审核要求（join_prompt，由调用方传入），完全由用户定义；
+        填写后判定完全跟随模型的 allowed 结论；留空时使用内置默认要求（必须同时包含
+        昵称与 OID/UID，缺任一即不通过）。
+        chat_id/fallback_chat_id 为入群审批专用模型（未配置时调用方会回退到消息审核模型），
+        ocr_chat_id 为识图模型（申请信息含图片时可带图审核）。
+        返回字段：allowed（是否满足要求）、has_nickname、has_oid、nickname、oid、reason
+        （不通过原因，供拒绝说明使用）、comment（补充说明）。
+        失败返回 None（如未配置模型或调用失败），由调用方保守处理。
         """
         if not comment.strip():
             return {
+                "allowed": False,
                 "has_nickname": False,
                 "has_oid": False,
                 "nickname": "",
                 "oid": "",
+                "reason": "入群申请信息为空",
                 "comment": "申请信息为空",
             }
-        prompt = (
-            "你是入群申请审核助手。请检查申请人填写的入群验证信息："
-            "它必须同时包含【昵称】和【OID】（也称 UID，是一串纯数字编号，如 QQ 号、学号等，不含字母）。"
-            "信息模糊、可读性差或格式不符合要求时倾向保守判断。"
-        )
-        system = f"{prompt}\n{_JOIN_JSON_RULE}"
+        wanted = str(prompt or "").strip()
+        # 自定义要求非空则完全替换内置要求；为空时使用内置默认要求
+        requirement = wanted or _DEFAULT_JOIN_PROMPT
+        is_custom = bool(wanted)
+        system = f"{requirement}\n{_JOIN_JSON_RULE}"
         user = f"入群验证信息内容：\n{comment[:500]}"
-        result = await self._ask(chat_id, fallback_chat_id, system, user)
+        result = await self._ask(chat_id, fallback_chat_id, system, user, ocr_chat_id=ocr_chat_id)
         if result is None:
             return None
+        has_nickname = bool(result.get("has_nickname"))
+        has_oid = bool(result.get("has_oid"))
+        oid = str(result.get("oid") or "").strip()
+        # OID 必须是纯数字；缺失或非数字均视为无效（内置默认要求以此为判定依据）
+        oid_valid = has_oid and oid.isdigit() and len(oid) >= 4
+        info_ok = has_nickname and oid_valid
+        raw_allowed = result.get("allowed")
+        if is_custom:
+            # 完全自定义要求：以模型的 allowed 为准，仅在其未给出该字段时按默认规则回退判断
+            allowed = info_ok if raw_allowed is None else bool(raw_allowed)
+        else:
+            # 内置默认要求：除模型判定外仍硬性校验昵称与 OID，避免误放行
+            allowed = (raw_allowed is not False) and info_ok
+        reason = str(result.get("reason") or "").strip()
+        if not allowed and not reason:
+            missing = []
+            if not has_nickname:
+                missing.append("昵称")
+            if not oid_valid:
+                missing.append("OID/UID")
+            reason = ("缺少" + "、".join(missing)) if missing else "申请信息不满足入群要求"
         return {
-            "has_nickname": bool(result.get("has_nickname")),
-            "has_oid": bool(result.get("has_oid")),
+            "allowed": allowed,
+            "has_nickname": has_nickname,
+            "has_oid": has_oid,
             "nickname": str(result.get("nickname") or "").strip(),
-            "oid": str(result.get("oid") or "").strip(),
+            "oid": oid,
+            "reason": reason,
             "comment": str(result.get("comment") or "").strip(),
         }

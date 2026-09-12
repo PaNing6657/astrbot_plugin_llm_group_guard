@@ -66,6 +66,15 @@ DEFAULT_GROUP_CONFIG = {
     "keyword_major_stair_max_seconds": 86400,  # 重度禁言封顶（秒）
     "keyword_major_recall_ban_threshold": 3,  # 重度撤回 N 次后自动禁言（仅 recall 模式，0=关闭）
     "join_verify_enable": False,
+    # 入群审批 LLM 独立选择：留空则沿用本群消息审核的主/备用/识图模型
+    "join_llm_chat": "",  # 入群审批专用主模型
+    "join_llm_chat_fallback": "",  # 入群审批专用备用模型
+    "join_llm_ocr_chat": "",  # 入群审批专用识图模型（审核信息含图片时使用）
+    # 入群审批要求完全自定义：留空仅用内置默认要求（需同时含昵称与 OID）
+    "join_prompt": "",
+    "join_auto_reject_enable": True,  # 不满足要求时自动拒绝（关闭则只跳过，留给管理员手动处理）
+    "join_reject_reply": "很抱歉，{reason}",  # 拒绝理由（回执给申请人，受长度限制）
+    "join_reject_notice": "",  # 拒绝后群内提示，支持 {at_user} {nickname} {oid} {user_id} {reason}，留空不发送
     "join_welcome_msg": "欢迎 {nickname} 加入本群！OID：{oid}",
     "join_card_notify": True,
     "join_card_notify_msg": "已自动将 {nickname} 的群名片修改为 {new_card}",
@@ -897,10 +906,11 @@ class LLMGroupGuardPlugin(Star):
                 or raw.get("sub_type") != "add"
             ):
                 return
-            if not self._gconf(str(raw.get("group_id") or "")).get("join_verify_enable"):
+            group_id = str(raw.get("group_id") or "")
+            gconf = self._gconf(group_id)
+            if not gconf.get("join_verify_enable"):
                 return  # 该群开关关闭则不自动审批
 
-            group_id = str(raw.get("group_id") or "")
             user_id = str(raw.get("user_id") or "")
             flag = str(raw.get("flag") or "")
             comment = str(raw.get("comment") or "").strip()
@@ -910,8 +920,10 @@ class LLMGroupGuardPlugin(Star):
             logger.info(f"[Guard] 收到入群申请: 群 {group_id} 用户 {user_id} 申请信息={comment!r}")
             verdict = await self.reviewer.judge_join_request(
                 comment,
-                chat_id=self._gconf(group_id).get("llm_chat"),
-                fallback_chat_id=self._gconf(group_id).get("llm_chat_fallback"),
+                prompt=gconf.get("join_prompt") or "",
+                chat_id=self._join_model(gconf, "join_llm_chat", "llm_chat"),
+                fallback_chat_id=self._join_model(gconf, "join_llm_chat_fallback", "llm_chat_fallback"),
+                ocr_chat_id=self._join_model(gconf, "join_llm_ocr_chat", "llm_ocr_chat"),
             )
             if verdict is None:
                 # LLM 不可用/失败：不自动审批，留给管理员手动处理
@@ -924,18 +936,33 @@ class LLMGroupGuardPlugin(Star):
             has_nickname = bool(verdict.get("has_nickname"))
             has_oid = bool(verdict.get("has_oid"))
             oid = str(verdict.get("oid") or "").strip()
-            # OID 必须是纯数字；缺失或非数字均视为无效
+            nickname = str(verdict.get("nickname") or "").strip()
+            # OID 必须是纯数字：非纯数字不用于改名片，避免脏数据进入名片
             oid_valid = has_oid and oid.isdigit() and len(oid) >= 4
-            if has_nickname and oid_valid:
-                await self._approve_join(event, group_id, user_id, flag, oid)
-            else:
-                # 校验不过：不拒绝也不同意，跳过自动审批，留给管理员手动处理
+            # 是否通过完全由审核判定决定（内置要求已在审核器内校验昵称+OID）
+            if bool(verdict.get("allowed")):
+                await self._approve_join(event, group_id, user_id, flag, oid if oid_valid else "")
+                return
+
+            reason = str(verdict.get("reason") or "").strip() or "申请信息不满足入群要求"
+            if not gconf.get("join_auto_reject_enable", True):
+                # 未开启自动拒绝：不拒绝也不同意，跳过自动审批，留给管理员手动处理
                 logger.info(
                     f"[Guard] 入群申请校验未通过，跳过自动审批: 群 {group_id} 用户 {user_id} "
-                    f"(has_nickname={has_nickname}, oid_valid={oid_valid})"
+                    f"(has_nickname={has_nickname}, oid_valid={oid_valid}, 原因={reason})"
                 )
+                return
+            await self._reject_join(
+                event, group_id, user_id, flag, comment,
+                reason=reason, nickname=nickname, oid=oid,
+            )
         except Exception as e:
             logger.error(f"[Guard] 入群申请自动审批异常: {e}")
+
+    @staticmethod
+    def _join_model(gconf: dict, join_key: str, guard_key: str) -> str:
+        """取入群审批使用的模型 ID：优先入群审批专用模型，未选择时沿用消息审核模型。"""
+        return str(gconf.get(join_key) or "").strip() or str(gconf.get(guard_key) or "").strip()
 
     async def _approve_join(self, event, group_id, user_id, flag, oid: str) -> None:
         """同意入群并记录 OID；即使 approve 未生效（如已被人工先批），仍按 AI 审批流程处理。"""
@@ -951,6 +978,72 @@ class LLMGroupGuardPlugin(Star):
             logger.warning(f"[Guard] 同意入群失败（可能已被人工审批）: 群 {group_id} 用户 {user_id}: {e}")
         # 用户进群后自动改名片为 QQ昵称_OID（对方需实际入群，延迟重试）
         asyncio.create_task(self._set_card_after_join(event.bot, group_id, user_id, oid))
+
+    async def _reject_join(
+        self,
+        event,
+        group_id,
+        user_id,
+        flag,
+        comment: str,
+        reason: str = "",
+        nickname: str = "",
+        oid: str = "",
+    ) -> None:
+        """拒绝入群申请：按自定义模板回执拒绝理由，并可发送群内拒绝提示。"""
+        gconf = self._gconf(group_id)
+        reason = str(reason or "").strip() or "申请信息不满足入群要求"
+        # 回执给申请人的理由：OneBot 通常限制在 200 字内，过长自动截断
+        reply_tpl = str(gconf.get("join_reject_reply") or "").strip()
+        reply = ""
+        if reply_tpl:
+            reply = self._build_text_with_at(
+                reply_tpl,
+                {
+                    "{reason}": reason,
+                    "{nickname}": nickname or user_id,
+                    "{oid}": oid,
+                    "{user_id}": user_id,
+                    "{comment}": comment,
+                },
+                user_id,
+            )[:180]
+        try:
+            await event.bot.api.call_action(
+                "set_group_add_request",
+                flag=flag,
+                sub_type="add",
+                approve=False,
+                reason=reply or reason[:180],
+            )
+            logger.info(
+                f"[Guard] 群 {group_id} 已拒绝用户 {user_id} 入群（原因={reason}，回执={reply!r}）"
+            )
+        except Exception as e:
+            # 常见于已被人工先一步审批：不中断，仅记录
+            logger.warning(f"[Guard] 拒绝入群失败（可能已被人工审批）: 群 {group_id} 用户 {user_id}: {e}")
+            return
+        # 群内拒绝提示（可选，留空不发送）
+        notice = str(gconf.get("join_reject_notice") or "").strip()
+        if not notice:
+            return
+        try:
+            await event.bot.send_group_msg(
+                group_id=int(group_id),
+                message=self._build_text_with_at(
+                    notice,
+                    {
+                        "{nickname}": nickname or user_id,
+                        "{oid}": oid,
+                        "{user_id}": user_id,
+                        "{comment}": comment,
+                        "{reason}": reason,
+                    },
+                    user_id,
+                ),
+            )
+        except Exception as e:
+            logger.warning(f"[Guard] 拒绝入群提示发送失败: 群 {group_id} 用户 {user_id}: {e}")
 
     async def _set_card_after_join(self, bot, group_id, user_id, oid: str) -> None:
         """入群后：改名片为『QQ昵称_OID』，并按改名片成功与否发送对应改名提示。"""

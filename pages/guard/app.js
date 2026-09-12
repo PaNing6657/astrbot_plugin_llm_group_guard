@@ -16,7 +16,7 @@ const GROUP_FIELDS = [
   { key: "guard_recall_ban_threshold", label: "撤回 N 次自动禁言", type: "number", hint: "仅 recall 模式生效，0=关闭" },
   { key: "guard_interval", label: "审核间隔（秒）", type: "number", hint: "0=每条都审" },
   { key: "guard_risk_as_violation", label: "风控拦截视为违规", type: "toggle" },
-  { key: "guard_prompt", label: "审核要求（自定义）", type: "textarea", full: true, hint: "完全自定义审核提示词（无内置话术），写清本群禁止内容；留空则仅保留 JSON 输出约束" },
+  { key: "guard_prompt", label: "审核要求（自定义·群消息）", type: "textarea", full: true, hint: "完全自定义群消息审核提示词（无内置话术），写清本群禁止内容；留空则仅保留 JSON 输出约束。入群审批审核要求见「入群审批」页的独立自定义项" },
   { key: "guard_notice", label: "违规通知消息", type: "text", full: true, hint: "支持 {user_id} {duration} {count} 占位符，留空不发送" },
   { key: "keyword_guard_enable", label: "关键词检测", type: "toggle", hint: "轻/重两级违规词各自独立处置与阶梯禁言，与 LLM 审核互不影响" },
   { key: "keyword_minor_list", label: "轻度违规词（逗号分隔）", type: "csv", full: true, hint: "命中轻度词按下方轻度处置执行" },
@@ -543,17 +543,38 @@ function toggleHandler(e) {
   e.currentTarget.classList.toggle("on");
 }
 
+// 入群审批模型下拉：选项来自 AstrBot 已配置模型，首项为"沿用消息审核模型"（空值）
+function fillJoinModelSelect(el, value, inheritLabel) {
+  const opts = astrbotProviders.map((p) =>
+    `<option value="${escapeHtml(p.id)}" ${p.id === value ? "selected" : ""}>${escapeHtml(p.label || p.id)}</option>`
+  ).join("");
+  el.innerHTML = `<option value="" ${value ? "" : "selected"}>${escapeHtml(inheritLabel)}</option>` + opts;
+}
+
 async function loadJoin() {
   let data;
   try {
-    data = await api("config", "GET", { group_id: currentGroup });
+    // 模型列表与群配置一起拉取，保证入群审批页的下拉选项最新
+    const [cfgData, provData] = await Promise.all([
+      api("config", "GET", { group_id: currentGroup }),
+      astrbotProviders.length ? Promise.resolve({ providers: astrbotProviders }) : api("providers").catch(() => ({ providers: [] })),
+    ]);
+    data = cfgData;
+    astrbotProviders = (provData && provData.providers) || [];
   } catch (e) {
     toast("joinToast", "加载失败：" + e, true);
     return;
   }
   const g = data.group || {};
   bindToggle($("joinVerifyToggle"), g.join_verify_enable);
+  bindToggle($("joinAutoRejectToggle"), g.join_auto_reject_enable !== false);
   bindToggle($("joinCardNotifyToggle"), g.join_card_notify);
+  fillJoinModelSelect($("joinLlmChat"), g.join_llm_chat || "", "（沿用群消息审核模型）");
+  fillJoinModelSelect($("joinLlmFallback"), g.join_llm_chat_fallback || "", "（沿用消息审核备用模型）");
+  fillJoinModelSelect($("joinLlmOcr"), g.join_llm_ocr_chat || "", "（沿用消息审核识图模型）");
+  $("joinPrompt").value = g.join_prompt || "";
+  $("joinRejectReply").value = g.join_reject_reply || "";
+  $("joinRejectNotice").value = g.join_reject_notice || "";
   $("joinWelcome").value = g.join_welcome_msg || "";
   $("joinCardNotifyMsg").value = g.join_card_notify_msg || "";
   $("joinCardNotifyFailMsg").value = g.join_card_notify_fail_msg || "";
@@ -561,6 +582,13 @@ async function loadJoin() {
 $("saveJoin").addEventListener("click", async () => {
   const payload = {
     join_verify_enable: $("joinVerifyToggle").classList.contains("on"),
+    join_llm_chat: $("joinLlmChat").value,
+    join_llm_chat_fallback: $("joinLlmFallback").value,
+    join_llm_ocr_chat: $("joinLlmOcr").value,
+    join_prompt: $("joinPrompt").value,
+    join_auto_reject_enable: $("joinAutoRejectToggle").classList.contains("on"),
+    join_reject_reply: $("joinRejectReply").value,
+    join_reject_notice: $("joinRejectNotice").value,
     join_welcome_msg: $("joinWelcome").value,
     join_card_notify: $("joinCardNotifyToggle").classList.contains("on"),
     join_card_notify_msg: $("joinCardNotifyMsg").value,
