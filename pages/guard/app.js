@@ -42,8 +42,8 @@ const GROUP_FIELDS = [
   { key: "ai_reply_whitelist", label: "AI 回复白名单（逗号分隔）", type: "csv", full: true, hint: "开启“仅回复管理”后，白名单 QQ 号仍可触发 AI 回复" },
 ];
 
-// 兼容中英文逗号分割
-const toCsv = (v) => (Array.isArray(v) ? v.join(", ") : v ?? "");
+// 兼容中英文逗号分割；回填不额外插入空格，避免 "微信, QQ, 4399" 这类多余空白
+const toCsv = (v) => (Array.isArray(v) ? v.join(",") : v ?? "");
 const fromCsv = (s) => String(s || "").split(/[,，]/).map((x) => x.trim()).filter(Boolean);
 
 // 页面状态：当前群、该群配置、AstrBot 已配置模型

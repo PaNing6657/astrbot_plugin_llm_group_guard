@@ -96,6 +96,34 @@ _LEGACY_GROUP_KEYS = set(DEFAULT_GROUP_CONFIG) | {"group_whitelist"}
 _GLOBAL_CONFIG_KEYS = set(DEFAULT_GLOBAL_CONFIG)
 _GROUP_CONFIG_KEYS = set(DEFAULT_GROUP_CONFIG)
 
+# 列表型配置键：保存/加载时统一规范化，避免逗号分隔串带出多余空格
+_LIST_CONFIG_KEYS = (
+    "keyword_list",
+    "keyword_minor_list",
+    "keyword_major_list",
+    "user_whitelist",
+    "ai_reply_whitelist",
+)
+
+
+def _normalize_list_value(value) -> list:
+    """把列表型配置规范化为去首尾空白、去空项、去重后的字符串列表。
+
+    容忍前端传入字符串（按中英文逗号切分）或列表；仅裁剪条目两端空白，
+    条目内部的空格（如 "代 开发票"）保持原样。
+    """
+    if isinstance(value, str):
+        value = re.split(r"[,，]", value)
+    if not isinstance(value, (list, tuple, set)):
+        return []
+    out = []
+    for item in value:
+        text = str(item).strip()
+        if text and text not in out:
+            out.append(text)
+    return out
+
+
 _WEEKDAY_NAMES = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "日": 7, "天": 7}
 _WEEKDAY_CN = {1: "周一", 2: "周二", 3: "周三", 4: "周四", 5: "周五", 6: "周六", 7: "周日"}
 
@@ -220,6 +248,7 @@ class LLMGroupGuardPlugin(Star):
             if gid and isinstance(gnew, dict):
                 gconf = self._gconf(gid)
                 gconf.update({k: v for k, v in gnew.items() if k in _GROUP_CONFIG_KEYS})
+                self._normalize_group_lists(gconf)
             self._save_config()
         except Exception as e:
             logger.error(f"WebUI 保存配置失败: {e}")
@@ -246,6 +275,7 @@ class LLMGroupGuardPlugin(Star):
             import copy as _copy
 
             groups[dst] = _copy.deepcopy(src_conf)
+            self._normalize_group_lists(groups[dst])
             self._save_config()
         except Exception as e:
             logger.error(f"[Guard] 同步群配置失败: {e}")
@@ -293,6 +323,7 @@ class LLMGroupGuardPlugin(Star):
                         merged = dict(DEFAULT_GROUP_CONFIG)
                         merged.update({k: v for k, v in gval.items() if k in _GROUP_CONFIG_KEYS})
                         self._migrate_legacy_keywords(merged)
+                        self._normalize_group_lists(merged)
                         groups[str(gid)] = merged
         else:
             # 旧扁平结构：自定义 LLM 配置已废弃（改用 AstrBot provider），仅迁移群级策略键
@@ -314,9 +345,17 @@ class LLMGroupGuardPlugin(Star):
                 gconf.update({k: v for k, v in self._group_template.items() if k in _GROUP_CONFIG_KEYS})
                 self._group_template = {}
             self._migrate_legacy_keywords(gconf)
+            self._normalize_group_lists(gconf)
             groups[gid] = gconf
             self._save_config()
         return gconf
+
+    @staticmethod
+    def _normalize_group_lists(gconf: dict) -> None:
+        """就地规范化群配置中的列表型键（关键词、白名单等）。"""
+        for key in _LIST_CONFIG_KEYS:
+            if key in gconf:
+                gconf[key] = _normalize_list_value(gconf[key])
 
     @staticmethod
     def _migrate_legacy_keywords(gconf: dict) -> None:
