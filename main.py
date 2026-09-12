@@ -14,6 +14,11 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import Aioc
 from astrbot.core.star.star_tools import StarTools
 
 from .core.event_utils import unwrap_event
+from .core.high_recall import (
+    high_recall_window,
+    high_recall_next_flip,
+    validate_high_recall_times,
+)
 from .core.permission_utils import check_group_and_permission
 from .core.whole_ban_scheduler import (
     ScheduleConflictError,
@@ -80,6 +85,18 @@ DEFAULT_GROUP_CONFIG = {
     "join_card_notify": True,
     "join_card_notify_msg": "已自动将 {nickname} 的群名片修改为 {new_card}",
     "join_card_notify_fail_msg": "",
+    # 高召回模式：每日定时切换到另一套审核规则与单独选择的模型
+    "high_recall_enable": False,  # 每日定时开关
+    "high_recall_start": "",  # 每日开启时间 HH:MM
+    "high_recall_end": "",  # 每日关闭时间 HH:MM（早于或等于开启时间视为次日）
+    "high_recall_prompt": "",  # 高召回审核要求（另一个审核规则），留空沿用 guard_prompt
+    "high_recall_llm_chat": "",  # 高召回专用主模型，留空沿用 llm_chat
+    "high_recall_llm_chat_fallback": "",  # 高召回专用备用模型
+    "high_recall_llm_ocr_chat": "",  # 高召回专用识图模型
+    "high_recall_on_msg": "🔍 高召回模式已开启，本时段将使用更严格的审核规则",
+    "high_recall_off_msg": "🔍 高召回模式已关闭，已恢复常规审核",
+    "high_recall_active": False,  # 运行时状态：高召回当前是否生效（持久化，重启后自动恢复）
+    "high_recall_manual_until": 0,  # 手动切换的临时状态截止时间戳（到期后由定时规则接管，0=无）
     "ai_reply_only_manager": False,
     "ai_reply_whitelist": [],
     "keyword_list": [],
@@ -172,7 +189,7 @@ def _to_weekly_rule(start_ts: float, end_ts: float) -> dict:
     }
 
 
-@register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核", "v1.0.0")
+@register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核", "v1.1.0")
 class LLMGroupGuardPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -247,8 +264,24 @@ class LLMGroupGuardPlugin(Star):
             gnew = payload.get("group")
             if gid and isinstance(gnew, dict):
                 gconf = self._gconf(gid)
-                gconf.update({k: v for k, v in gnew.items() if k in _GROUP_CONFIG_KEYS})
+                allowed = {k: v for k, v in gnew.items() if k in _GROUP_CONFIG_KEYS}
+                # 先合并校验再落库：定时开关打开时高召回时间必须合法
+                merged = dict(gconf)
+                merged.update(allowed)
+                error = self._validate_high_recall(merged)
+                if error:
+                    return error_response(error)
+                was_hr_enabled = bool(gconf.get("high_recall_enable"))
+                gconf.update(allowed)
                 self._normalize_group_lists(gconf)
+                # 定时开关变化时立即对齐当前时段，其余交由调度循环接管（避免残留生效无人关闭）
+                if gconf.get("high_recall_enable") != was_hr_enabled:
+                    desired = bool(
+                        gconf.get("high_recall_enable")
+                        and high_recall_window(gconf.get("high_recall_start"), gconf.get("high_recall_end"))
+                    )
+                    if bool(gconf.get("high_recall_active")) != desired:
+                        await self._set_high_recall(gid, desired)
             self._save_config()
         except Exception as e:
             logger.error(f"WebUI 保存配置失败: {e}")
@@ -499,6 +532,23 @@ class LLMGroupGuardPlugin(Star):
         if old.get("started"):
             await self._apply_scheduled(gid, old, enable=False)
         return json_response({"deleted": True})
+
+    async def web_high_recall_set(self):
+        """POST /{base}/high-recall/set：手动开启/关闭高召回模式。"""
+        payload = await request.json(default={})
+        gid = str(payload.get("group_id") or "").strip()
+        if not gid:
+            return error_response("缺少 group_id")
+        try:
+            await self._set_high_recall(gid, bool(payload.get("active")), manual=True)
+        except Exception as e:
+            logger.error(f"[Guard] 手动切换高召回失败: {e}")
+            return error_response(f"操作失败：{e}")
+        gconf = self._gconf(gid)
+        return json_response({
+            "active": bool(gconf.get("high_recall_active")),
+            "manual_until": float(gconf.get("high_recall_manual_until") or 0),
+        })
 
     # ------------------------------------------------------------------
     # 本地持久化数据管理：查看/一键删除（含已解散群的残留配置与定时任务）
@@ -796,12 +846,13 @@ class LLMGroupGuardPlugin(Star):
         )
 
     async def _schedule_loop(self):
-        """后台调度循环：到点开启、到时解除，失败自动重试。"""
+        """后台调度循环：定时禁言与高召回模式到点切换，失败自动重试。"""
         while True:
             try:
                 await self._check_schedules()
+                await self._check_high_recall()
             except Exception as e:
-                logger.error(f"定时全体禁言调度循环异常: {e}")
+                logger.error(f"定时调度循环异常: {e}")
             await asyncio.sleep(CHECK_INTERVAL)
 
     async def _check_schedules(self):
@@ -870,6 +921,93 @@ class LLMGroupGuardPlugin(Star):
                 logger.info(f"群 {gid} 定时全体禁言已开启: {msg}")
             else:
                 logger.warning(f"群 {gid} 定时开启全体禁言失败，稍后重试: {msg}")
+
+    # ------------------------------------------------------------------
+    # 高召回模式：每日定时切换到另一套审核规则与单独选择的模型，切换时发送群内提示
+    # ------------------------------------------------------------------
+    def _hr_bot(self, group_id):
+        """取群内可用的 bot 连接：群消息缓存优先，平台兜底。"""
+        runtime = self._group_runtime.get(str(group_id)) or {}
+        return runtime.get("bot") or getattr(self, "_platform_bot", None)
+
+    @staticmethod
+    def _validate_high_recall(gconf: dict) -> Optional[str]:
+        """校验高召回定时配置：未启用定时或时间合法时返回 None。"""
+        if not gconf.get("high_recall_enable"):
+            return None
+        return validate_high_recall_times(gconf.get("high_recall_start"), gconf.get("high_recall_end"))
+
+    async def _set_high_recall(self, group_id, active: bool, manual: bool = False) -> bool:
+        """切换高召回状态并落盘；状态实际变化时发送开关提示（无连接时排队补发）。"""
+        gconf = self._gconf(group_id)
+        changed = bool(gconf.get("high_recall_active")) != bool(active)
+        gconf["high_recall_active"] = bool(active)
+        if manual:
+            # 手动切换为临时状态：到下一个定时节点交还定时规则（未启用定时则长期保持）
+            gconf["high_recall_manual_until"] = (
+                high_recall_next_flip(gconf.get("high_recall_start"), gconf.get("high_recall_end"))
+                if gconf.get("high_recall_enable") else 0
+            )
+        if changed or manual:
+            self._save_config()
+        if changed:
+            logger.info(f"[Guard] 群 {group_id} 高召回模式已{'开启' if active else '关闭'}")
+            if not await self._try_send_hr_notice(group_id, bool(active)):
+                self._hr_pending[str(group_id)] = bool(active)
+        return changed
+
+    async def _try_send_hr_notice(self, group_id, active: bool) -> bool:
+        """发送高召回开启/关闭提示；未配置提示语视为成功，缺少连接或发送失败返回 False。"""
+        gconf = self._gconf(group_id)
+        template = str(gconf.get("high_recall_on_msg" if active else "high_recall_off_msg") or "").strip()
+        if not template:
+            return True
+        bot = self._hr_bot(group_id)
+        if bot is None:
+            return False
+        text = (
+            template
+            .replace("{start_time}", str(gconf.get("high_recall_start") or "").strip())
+            .replace("{end_time}", str(gconf.get("high_recall_end") or "").strip())
+        )
+        try:
+            await bot.send_group_msg(group_id=int(group_id), message=text)
+            return True
+        except Exception as e:
+            logger.warning(f"[Guard] 群 {group_id} 高召回提示发送失败: {e}")
+            return False
+
+    async def _flush_hr_pending(self) -> None:
+        """补发因缺少连接未送出的提示；状态已变化或数据已删除的过期提示直接丢弃。"""
+        for gid, active in list(self._hr_pending.items()):
+            gconf = (self.config.get("groups") or {}).get(gid)
+            if gconf is None or bool(gconf.get("high_recall_active")) != active:
+                del self._hr_pending[gid]
+                continue
+            if await self._try_send_hr_notice(gid, active):
+                del self._hr_pending[gid]
+
+    async def _check_high_recall(self) -> None:
+        """调度循环：到点开启/关闭高召回；手动切换的临时状态到期后由定时规则接管。"""
+        now = time.time()
+        await self._flush_hr_pending()
+        for gid, gconf in list((self.config.get("groups") or {}).items()):
+            try:
+                if not gconf.get("high_recall_enable"):
+                    continue
+                until = float(gconf.get("high_recall_manual_until") or 0)
+                if until and now < until:
+                    continue  # 手动切换的临时状态未到期
+                if until:
+                    gconf["high_recall_manual_until"] = 0
+                    self._save_config()
+                desired = high_recall_window(
+                    gconf.get("high_recall_start"), gconf.get("high_recall_end"), now
+                ) is not None
+                if bool(gconf.get("high_recall_active")) != desired:
+                    await self._set_high_recall(str(gid), desired)
+            except Exception as e:
+                logger.error(f"[Guard] 群 {gid} 高召回调度异常: {e}")
 
     # ------------------------------------------------------------------
     # 自动审批入群：LLM 检测申请信息是否含昵称与 OID，通过则同意并自动改名片

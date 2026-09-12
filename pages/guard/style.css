@@ -155,7 +155,7 @@ body {
 .field select { appearance: none; cursor: pointer; }
 .field .hint { font-size: 11px; color: var(--text-faint); }
 
-/* toggle switch */
+/* ---------- toggle switch ---------- */
 .toggle-row { display: flex; align-items: center; justify-content: space-between; gap: 14px; }
 .toggle-row .t-label { font-size: 13px; }
 .toggle-row .t-hint { font-size: 11px; color: var(--text-faint); margin-top: 3px; }
@@ -172,6 +172,10 @@ body {
 }
 .toggle.on { background: var(--accent); border-color: var(--accent); }
 .toggle.on::after { left: 20px; background: #fff; box-shadow: 0 1px 3px rgba(31, 64, 120, .3); }
+
+/* ---------- 高召回模式状态行 ---------- */
+.hr-status { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-dim); }
+.hr-status #hrStateHint { font-size: 11px; color: var(--text-faint); }
 
 /* ---------- actions ---------- */
 .actions { display: flex; align-items: center; gap: 14px; margin-top: 18px; }

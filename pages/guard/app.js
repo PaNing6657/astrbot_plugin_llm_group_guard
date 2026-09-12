@@ -78,6 +78,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
     if (btn.dataset.tab === "violations") loadViolations();
     if (btn.dataset.tab === "schedules") loadSchedules();
     if (btn.dataset.tab === "join") loadJoin();
+    if (btn.dataset.tab === "hr") loadHighRecall();
     if (btn.dataset.tab === "data") loadLocalData();
   });
 });
@@ -543,8 +544,8 @@ function toggleHandler(e) {
   e.currentTarget.classList.toggle("on");
 }
 
-// 入群审批模型下拉：选项来自 AstrBot 已配置模型，首项为"沿用消息审核模型"（空值）
-function fillJoinModelSelect(el, value, inheritLabel) {
+// 模型下拉：选项来自 AstrBot 已配置模型，首项为"沿用"（空值）
+function fillModelSelect(el, value, inheritLabel) {
   const opts = astrbotProviders.map((p) =>
     `<option value="${escapeHtml(p.id)}" ${p.id === value ? "selected" : ""}>${escapeHtml(p.label || p.id)}</option>`
   ).join("");
@@ -601,6 +602,84 @@ $("saveJoin").addEventListener("click", async () => {
     toast("joinToast", "保存失败：" + e, true);
   }
 });
+
+/* ---------- 高召回模式（按当前群） ---------- */
+function renderHrStatus(g) {
+  const on = !!g.high_recall_active;
+  const state = $("hrState");
+  state.className = "badge " + (on ? "red" : "");
+  state.textContent = on ? "生效中" : "未生效";
+  const until = Number(g.high_recall_manual_until || 0);
+  let hint = "";
+  if (until && until * 1000 > Date.now()) {
+    hint = "手动切换的临时状态，到下一个定时节点自动恢复";
+  } else if (g.high_recall_enable) {
+    hint = `定时 ${g.high_recall_start || "--:--"} 开启 · ${g.high_recall_end || "--:--"} 关闭`;
+  } else if (on) {
+    hint = "手动开启中（每日定时未启用）";
+  }
+  $("hrStateHint").textContent = hint;
+}
+
+async function loadHighRecall() {
+  let data;
+  try {
+    const [cfgData, provData] = await Promise.all([
+      api("config", "GET", { group_id: currentGroup }),
+      astrbotProviders.length ? Promise.resolve({ providers: astrbotProviders }) : api("providers").catch(() => ({ providers: [] })),
+    ]);
+    data = cfgData;
+    astrbotProviders = (provData && provData.providers) || [];
+  } catch (e) {
+    toast("hrToast", "加载失败：" + e, true);
+    return;
+  }
+  const g = data.group || {};
+  bindToggle($("hrEnableToggle"), g.high_recall_enable);
+  $("hrStart").value = g.high_recall_start || "";
+  $("hrEnd").value = g.high_recall_end || "";
+  fillModelSelect($("hrLlmChat"), g.high_recall_llm_chat || "", "（沿用常规审核主模型）");
+  fillModelSelect($("hrLlmFallback"), g.high_recall_llm_chat_fallback || "", "（沿用常规审核备用模型）");
+  fillModelSelect($("hrLlmOcr"), g.high_recall_llm_ocr_chat || "", "（沿用常规审核识图模型）");
+  $("hrPrompt").value = g.high_recall_prompt || "";
+  $("hrOnMsg").value = g.high_recall_on_msg || "";
+  $("hrOffMsg").value = g.high_recall_off_msg || "";
+  renderHrStatus(g);
+}
+
+$("saveHr").addEventListener("click", async () => {
+  const payload = {
+    high_recall_enable: $("hrEnableToggle").classList.contains("on"),
+    high_recall_start: $("hrStart").value.trim(),
+    high_recall_end: $("hrEnd").value.trim(),
+    high_recall_llm_chat: $("hrLlmChat").value,
+    high_recall_llm_chat_fallback: $("hrLlmFallback").value,
+    high_recall_llm_ocr_chat: $("hrLlmOcr").value,
+    high_recall_prompt: $("hrPrompt").value,
+    high_recall_on_msg: $("hrOnMsg").value,
+    high_recall_off_msg: $("hrOffMsg").value,
+  };
+  try {
+    await api("config/save", "POST", { group_id: currentGroup, group: payload });
+    toast("hrToast", "已保存");
+    loadHighRecall();
+  } catch (e) {
+    toast("hrToast", "保存失败：" + e, true);
+  }
+});
+
+async function setHrManual(active) {
+  try {
+    await api("high-recall/set", "POST", { group_id: currentGroup, active });
+    toast("hrToast", active ? "已立即开启高召回模式" : "已立即关闭高召回模式");
+    loadHighRecall();
+  } catch (e) {
+    toast("hrToast", "操作失败：" + e, true);
+  }
+}
+
+$("hrManualOn").addEventListener("click", () => setHrManual(true));
+$("hrManualOff").addEventListener("click", () => setHrManual(false));
 
 /* ---------- 初始化 ---------- */
 (async function init() {

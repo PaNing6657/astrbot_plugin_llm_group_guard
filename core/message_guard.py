@@ -157,6 +157,28 @@ class MessageGuard:
         }
 
     @staticmethod
+    def _llm_review_settings(gconf: dict) -> dict:
+        """取本次审核使用的规则与模型。
+
+        高召回模式生效时优先使用高召回专用设置（另一个审核规则 + 单独选择的模型），
+        未单独填写的项沿用常规审核设置。
+        """
+        def _pick(hr_key: str, base_key: str) -> str:
+            if gconf.get("high_recall_active"):
+                value = str(gconf.get(hr_key) or "").strip()
+                if value:
+                    return value
+            return str(gconf.get(base_key) or "").strip()
+
+        return {
+            "high_recall": bool(gconf.get("high_recall_active")),
+            "prompt": _pick("high_recall_prompt", "guard_prompt"),
+            "chat_id": _pick("high_recall_llm_chat", "llm_chat"),
+            "fallback_chat_id": _pick("high_recall_llm_chat_fallback", "llm_chat_fallback"),
+            "ocr_chat_id": _pick("high_recall_llm_ocr_chat", "llm_ocr_chat"),
+        }
+
+    @staticmethod
     def _extract_image_urls(event: AiocqhttpMessageEvent) -> list:
         """从消息链提取图片 URL 列表（aiocqhttp/OneBot image 段，最多 3 张）。"""
         raw = getattr(event.message_obj, "raw_message", None)
@@ -243,12 +265,14 @@ class MessageGuard:
         if preview:
             return False  # 预审只做关键词拦截，LLM 审核仍由后台任务完整执行
 
-        # LLM 审核：独立开关，与关键词检测互不影响
+        # LLM 审核：独立开关，与关键词检测互不影响；高召回模式生效时换用另一套规则与模型
         if not gconf.get("guard_enable"):
             return False
-        if not gconf.get("llm_chat") or not self.reviewer.enabled():
+        settings = self._llm_review_settings(gconf)
+        mode_note = "（高召回模式）" if settings["high_recall"] else ""
+        if not settings["chat_id"] or not self.reviewer.enabled():
             logger.info(
-                "[MessageGuard] 本群未选择 LLM 模型或 AstrBot 上下文不可用，跳过审核"
+                f"[MessageGuard] 本群未选择 LLM 模型或 AstrBot 上下文不可用，跳过审核{mode_note}"
             )
             return False
 
@@ -294,7 +318,7 @@ class MessageGuard:
             )
             violated = True
         elif bool(verdict.get("allowed")):
-            logger.info(f"[MessageGuard] 群 {group_id} 成员 {user_id} 消息判定合规，不处置")
+            logger.info(f"[MessageGuard] 群 {group_id} 成员 {user_id} 消息判定合规{mode_note}，不处置")
             self._mark_handled(key)  # 已完整审核过（合规），后台无需重复审核
             return False
 
