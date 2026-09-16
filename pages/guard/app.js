@@ -42,6 +42,9 @@ const GROUP_FIELDS = [
   { key: "ai_reply_whitelist", label: "AI 回复白名单（逗号分隔）", type: "csv", full: true, hint: "开启“仅回复管理”后，白名单 QQ 号仍可触发 AI 回复" },
 ];
 
+// 不依赖群管理权限的配置项：非管理群仍可编辑（AI 回复范围控制）
+const ALLOW_UNMANAGED_KEYS = (key) => key === "ai_reply_only_manager" || key === "ai_reply_whitelist";
+
 // 兼容中英文逗号分割；回填不额外插入空格，避免 "微信, QQ, 4399" 这类多余空白
 const toCsv = (v) => (Array.isArray(v) ? v.join(",") : v ?? "");
 const fromCsv = (s) => String(s || "").split(/[,，]/).map((x) => x.trim()).filter(Boolean);
@@ -75,12 +78,17 @@ function setGroupManaged(managed) {
   $("managedWarn").classList.toggle("hidden", currentGroupManaged);
 }
 
+// 非管理群禁用控件；标注 data-allow-unmanaged 的项不依赖群管理权限，保持可用
 function lockControls(container, locked) {
   if (!container) return;
   container.querySelectorAll("input, select, textarea, button").forEach((el) => {
+    if (el.dataset.allowUnmanaged === "1") return;
     el.disabled = locked;
   });
-  container.querySelectorAll(".toggle").forEach((el) => el.classList.toggle("locked", locked));
+  container.querySelectorAll(".toggle").forEach((el) => {
+    if (el.dataset.allowUnmanaged === "1") return;
+    el.classList.toggle("locked", locked);
+  });
 }
 
 function managedBlocked(toastId, msg) {
@@ -259,7 +267,7 @@ function renderConfigForm() {
       el.innerHTML =
         `<div class="toggle-row"><div><div class="t-label">${f.label}</div>` +
         (f.hint ? `<div class="t-hint">${f.hint}</div>` : "") + `</div>` +
-        `<div class="toggle ${val ? "on" : ""}" data-key="${f.key}"></div></div>`;
+        `<div class="toggle ${val ? "on" : ""}" data-key="${f.key}"${ALLOW_UNMANAGED_KEYS(f.key) ? ' data-allow-unmanaged="1"' : ""}></div></div>`;
       el.querySelector(".toggle").addEventListener("click", (e) => {
         if (e.currentTarget.classList.contains("locked")) return; // 非管理群：设置只读
         e.currentTarget.classList.toggle("on");
@@ -282,7 +290,7 @@ function renderConfigForm() {
         (f.hint ? `<div class="hint">${f.hint}</div>` : "");
     } else {
       const isCsv = f.type === "csv";
-      el.innerHTML = `<label>${f.label}</label><input type="text" data-key="${f.key}" class="${isCsv ? "csv" : ""}" value="${escapeHtml(isCsv ? toCsv(val) : (val ?? ""))}">` +
+      el.innerHTML = `<label>${f.label}</label><input type="text" data-key="${f.key}" class="${isCsv ? "csv" : ""}"${ALLOW_UNMANAGED_KEYS(f.key) ? ' data-allow-unmanaged="1"' : ""} value="${escapeHtml(isCsv ? toCsv(val) : (val ?? ""))}">` +
         (f.hint ? `<div class="hint">${f.hint}</div>` : "");
     }
     grid.appendChild(el);

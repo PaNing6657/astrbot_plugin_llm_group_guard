@@ -712,8 +712,8 @@ class LLMGroupGuardPlugin(Star):
             return
         self._managed_warned.add(gid)
         logger.warning(
-            f"[Guard] 机器人在群 {gid} 非群主/管理员，已停用本插件全部设置"
-            f"（不审核、不禁言、不审批、不发送提示）"
+            f"[Guard] 机器人在群 {gid} 非群主/管理员，已停用需要管理员权限的功能"
+            f"（违规审核与处置、定时禁言、高召回、入群审批）；AI 仅回复管理与进群欢迎不受影响"
         )
 
     def _get_any_bot(self):
@@ -1110,10 +1110,10 @@ class LLMGroupGuardPlugin(Star):
             user_id = str(raw.get("user_id") or "")
             if not group_id or not user_id or user_id == str(raw.get("operator_id") or ""):
                 return  # 无群/无用户，或为机器人自身进群时跳过
-            # 机器人非群主/管理员的群：不发送欢迎 / 改名提示（与其余设置保持一致）
-            if not self._is_managed_group(group_id):
+            # 进群欢迎不依赖群管理权限：非管理群照常发送欢迎语，只是不做改名相关提示
+            managed = self._is_managed_group(group_id)
+            if not managed:
                 self._warn_unmanaged(group_id)
-                return
 
             # 统一使用同一套欢迎词（join_welcome_msg）；有 OID（AI 审批缓存或名片提取）则带上
             cache_oid = (self._join_oid.get(group_id) or {}).get(user_id)
@@ -1150,8 +1150,8 @@ class LLMGroupGuardPlugin(Star):
                 ),
             )
             logger.info(f"[Guard] 群 {group_id} 成员 {user_id} 进群，已发送欢迎")
-            # 未拿到 OID（非 AI 审批路径，如 LLM 未识别 OID 但人工审核通过）：名片无法按 _OID 修改，发失败提示
-            if not oid:
+            # 未拿到 OID：名片无法按 _OID 修改，发失败提示；非管理群不涉及改名片流程，跳过
+            if not oid and managed:
                 await self._send_card_notify(event.bot, group_id, user_id, nickname, "", ok=False)
         except Exception as e:
             logger.error(f"[Guard] 进群欢迎处理异常: {e}")
@@ -1387,12 +1387,8 @@ class LLMGroupGuardPlugin(Star):
         if not group_id:
             return
         self._group_runtime[str(group_id)] = {"bot": event.bot}
-        # 机器人非群主/管理员的群：本插件全部设置不生效（不审核、不处置、不干预 AI 回复）
-        if not self._is_managed_group(group_id):
-            self._warn_unmanaged(group_id)
-            return
         gconf = self._gconf(group_id)
-        # AI 回复范围开关：非群主/群管/机器人管理员且非白名单的消息不进入 AI 会话（含免@对话）
+        # AI 回复范围开关不依赖群管理权限：非管理群同样生效
         # 仅阻止 AI 会话处理，不影响本插件审核/指令等功能
         if (
             gconf.get("ai_reply_only_manager")
@@ -1403,6 +1399,10 @@ class LLMGroupGuardPlugin(Star):
                 event.stop_event()  # 阻止后续 AI 会话处理
             except Exception as e:
                 logger.debug(f"[Guard] stop_event 调用失败: {e}")
+        # 其余功能需要群管理权限：机器人非群主/管理员的群不审核、不处置、不响应管理指令
+        if not self._is_managed_group(group_id):
+            self._warn_unmanaged(group_id)
+            return
         # 先尝试解析 "对@某人禁言10分钟" 类指令，命中则不再走违规审核
         if await self._try_member_ban_cmd(event):
             return

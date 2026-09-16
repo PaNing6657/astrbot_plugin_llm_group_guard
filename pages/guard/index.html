@@ -34,7 +34,7 @@
 
   <main>
     <div class="managed-warn hidden" id="managedWarn">
-      机器人在该群不是群主 / 管理员：需要管理员权限的功能（违规审核与处置、定时禁言、高召回、入群审批）已停用，相关设置与按钮不可修改。
+      机器人在该群不是群主 / 管理员：需要管理员权限的功能（违规审核与处置、定时禁言、高召回、入群审批与自动改名）已停用，相关设置不可修改；「AI 仅回复管理」与「进群欢迎」不依赖群管理权限，仍可正常配置与生效。
     </div>
 
     <!-- 配置 -->
@@ -53,7 +53,7 @@
       </div>
       <div class="card" id="configForm"></div>
       <div class="actions">
-        <button class="btn primary" id="saveConfig">保存配置</button>
+        <button class="btn primary" id="saveConfig" data-allow-unmanaged="1">保存配置</button>
         <span class="toast" id="configToast"></span>
       </div>
     </section>
@@ -248,7 +248,7 @@
 
         <div class="field" style="margin-top: 16px;">
           <label>进群欢迎词</label>
-          <textarea id="joinWelcome" placeholder="例如：欢迎 {at_user} 加入本群！OID：{oid}"></textarea>
+          <textarea id="joinWelcome" data-allow-unmanaged="1" placeholder="例如：欢迎 {at_user} 加入本群！OID：{oid}"></textarea>
           <p class="hint">成员进群后发送，支持 {at_user}(@该用户) {nickname} {oid} {user_id}，留空不发送</p>
         </div>
 
@@ -273,7 +273,7 @@
         </div>
 
         <div class="actions">
-          <button class="btn primary" id="saveJoin">保存入群设置</button>
+          <button class="btn primary" id="saveJoin" data-allow-unmanaged="1">保存入群设置</button>
           <span class="toast" id="joinToast"></span>
         </div>
       </div>
