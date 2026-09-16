@@ -379,7 +379,6 @@ async function loadConfig() {
 
 $("saveConfig").addEventListener("click", async () => {
   const btn = $("saveConfig");
-  if (managedBlocked("configToast")) return;
   btn.disabled = true;
   try {
     await api("config/save", "POST", { group_id: currentGroup, group: collectGroupConfig() });
@@ -625,7 +624,6 @@ async function loadJoin() {
   lockControls($("page-join"), !currentGroupManaged); // 非管理群：审批设置只读
 }
 $("saveJoin").addEventListener("click", async () => {
-  if (managedBlocked("joinToast", "该群机器人非群主/管理员，入群审批不可用")) return;
   const payload = {
     join_verify_enable: $("joinVerifyToggle").classList.contains("on"),
     join_llm_chat: $("joinLlmChat").value,
