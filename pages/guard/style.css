@@ -177,6 +177,17 @@ body {
 .hr-status { display: flex; align-items: center; gap: 10px; font-size: 12px; color: var(--text-dim); }
 .hr-status #hrStateHint { font-size: 11px; color: var(--text-faint); }
 
+/* ---------- 群权限：非管理群提示与禁用态 ---------- */
+.managed-warn {
+  margin-bottom: 16px; padding: 12px 18px; border-radius: 10px; line-height: 1.7;
+  background: rgba(232, 147, 12, .09); border: 1px solid rgba(232, 147, 12, .35);
+  color: var(--warn); font-size: 12px;
+}
+.group-item.unmanaged { border-style: dashed; }
+.toggle.locked { opacity: .45; cursor: not-allowed; }
+.field input:disabled, .field select:disabled, .field textarea:disabled,
+.schedule-form input:disabled, .copy-bar select:disabled { opacity: .55; cursor: not-allowed; }
+
 /* ---------- actions ---------- */
 .actions { display: flex; align-items: center; gap: 14px; margin-top: 18px; }
 .btn {

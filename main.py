@@ -32,6 +32,8 @@ from .core.text_utils import build_text_with_at
 
 PLUGIN_NAME = "astrbot_plugin_llm_group_guard"
 CHECK_INTERVAL = 20  # 定时禁言调度循环检查间隔（秒）
+BOT_ROLE_REFRESH_INTERVAL = 60  # 机器人群内身份探测间隔（秒）
+MANAGED_ROLES = ("owner", "admin")  # 具备群管理能力的身份
 
 # 已移除 _conf_schema.json（不提供 AstrBot 自带设置页），
 # 配置默认值内聚于此，全部由插件 WebUI 页面管理。
@@ -189,7 +191,7 @@ def _to_weekly_rule(start_ts: float, end_ts: float) -> dict:
     }
 
 
-@register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核", "v1.1.0")
+@register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核", "v1.2.0")
 class LLMGroupGuardPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -216,6 +218,12 @@ class LLMGroupGuardPlugin(Star):
         self._group_runtime: dict[str, dict] = {}
         # 审批通过者的 OID 缓存 {gid: {uid: oid}}，供成员进群事件发送欢迎时使用
         self._join_oid: dict[str, dict[str, str]] = {}
+        # 高召回开关提示的待补发队列 {gid: 目标状态}：缺少连接时先入队，恢复后补发
+        self._hr_pending: dict[str, bool] = {}
+        # 机器人在各群的群主/管理员身份缓存 {gid: role}：非管理群一律停用本插件功能
+        self._bot_roles: dict[str, str] = {}
+        self._bot_roles_checked_at = 0.0
+        self._managed_warned: set[str] = set()  # 已提示过"非管理员"的群，避免重复刷日志
         # 平台级 bot 客户端兜底：插件重启后即使群里无新消息也能执行定时任务
         self._platform_bot = None
         self._scheduler_task: Optional[asyncio.Task] = None
@@ -638,6 +646,8 @@ class LLMGroupGuardPlugin(Star):
         # 4. 清理运行态缓存
         self._group_runtime.pop(gid, None)
         self._join_oid.pop(gid, None)
+        self._bot_roles.pop(gid, None)
+        self._managed_warned.discard(gid)
 
     # 权限开关每次实时读取该群配置，避免修改配置后需要重启插件才生效
     def _permission_verification(self, group_id) -> bool:
@@ -645,6 +655,66 @@ class LLMGroupGuardPlugin(Star):
 
     def _allow_groupadmin_use(self, group_id) -> bool:
         return bool(self._gconf(group_id).get("allow_groupadmin_use", False))
+
+    # ------------------------------------------------------------------
+    # 群管理权限：机器人非群主/管理员的群，本插件全部功能一律停用
+    # ------------------------------------------------------------------
+    def _tracked_groups(self) -> set:
+        """需要探测机器人身份的群：已有群配置或定时任务的群。"""
+        groups = {str(g) for g in (self.config.get("groups") or {})}
+        groups |= {str(g) for g in self.scheduler.all()}
+        return groups
+
+    async def _refresh_bot_roles(self, force: bool = False) -> None:
+        """定期探测机器人在各群的群主/管理员身份，结果缓存供各处判定使用。"""
+        now = time.time()
+        if not force and now - self._bot_roles_checked_at < BOT_ROLE_REFRESH_INTERVAL:
+            return
+        self._bot_roles_checked_at = now
+        gids = self._tracked_groups()
+        for gid in list(self._bot_roles):
+            if gid not in gids:
+                self._bot_roles.pop(gid, None)  # 已不再跟踪的群清理缓存
+        bot = self._get_any_bot()
+        if bot is None or not gids:
+            return
+        try:
+            login = await bot.api.call_action("get_login_info")
+        except Exception as e:
+            logger.warning(f"[Guard] 获取机器人账号信息失败，暂不更新群权限: {e}")
+            return
+        self_id = str((login or {}).get("user_id") or "")
+        if not self_id:
+            return
+        for gid in gids:
+            try:
+                info = await bot.api.call_action(
+                    "get_group_member_info", group_id=int(gid), user_id=int(self_id)
+                )
+            except Exception:
+                continue  # 探测失败保留旧值，避免误停用
+            role = str((info or {}).get("role") or "").lower()
+            if not role:
+                continue
+            self._bot_roles[gid] = role
+            if role in MANAGED_ROLES:
+                self._managed_warned.discard(gid)  # 恢复管理身份后可再次提示
+
+    def _is_managed_group(self, group_id) -> bool:
+        """机器人是否为该群群主/管理员；尚未探测到的群保守视为可用。"""
+        role = self._bot_roles.get(str(group_id))
+        return role is None or role in MANAGED_ROLES
+
+    def _warn_unmanaged(self, group_id) -> None:
+        """非管理群提示：同一群只提示一次，避免调度循环刷日志。"""
+        gid = str(group_id)
+        if gid in self._managed_warned:
+            return
+        self._managed_warned.add(gid)
+        logger.warning(
+            f"[Guard] 机器人在群 {gid} 非群主/管理员，已停用本插件全部设置"
+            f"（不审核、不禁言、不审批、不发送提示）"
+        )
 
     def _get_any_bot(self):
         """获取任一可用的 aiocqhttp 客户端：平台兜底 → 群消息缓存 → 平台管理器。"""
@@ -667,7 +737,10 @@ class LLMGroupGuardPlugin(Star):
         return None
 
     async def web_group_list(self):
-        """GET /{base}/groups：返回机器人为群主/管理员的群列表（带 60 秒缓存，?force=1 强刷）。"""
+        """GET /{base}/groups：返回机器人已加入的全部群（含其在群内身份，带 60 秒缓存，?force=1 强刷）。
+
+        role/managed 供前端判断：非群主/管理员的群仅可查看，需要管理员权限的设置与按钮一并禁用。
+        """
         now = time.time()
         force = str(request.query.get("force") or "").strip() == "1"
         cache = getattr(self, "_groups_cache", None)
@@ -697,15 +770,15 @@ class LLMGroupGuardPlugin(Star):
                     "group_id": gid,
                     "group_name": str(g.get("group_name") or gid),
                     "role": role,
+                    "managed": role in MANAGED_ROLES,
                 }
 
             results = await asyncio.gather(*[_check(g) for g in groups], return_exceptions=True)
-            managed = [
-                r for r in results
-                if isinstance(r, dict) and r["role"] in ("owner", "admin")
-            ]
-            self._groups_cache = {"ts": time.time(), "bot": bot, "groups": managed}
-            return json_response({"groups": managed, "cached": False})
+            out = [r for r in results if isinstance(r, dict)]
+            # 可管理的群排在前面，便于优先选择
+            out.sort(key=lambda r: (not r["managed"], r["group_name"]))
+            self._groups_cache = {"ts": time.time(), "bot": bot, "groups": out}
+            return json_response({"groups": out, "cached": False})
         except Exception as e:
             logger.error(f"[Guard] 获取群列表失败: {e}")
             return error_response(f"获取群列表失败：{e}")
@@ -847,9 +920,10 @@ class LLMGroupGuardPlugin(Star):
         )
 
     async def _schedule_loop(self):
-        """后台调度循环：定时禁言与高召回模式到点切换，失败自动重试。"""
+        """后台调度循环：刷新群权限、定时禁言与高召回模式到点切换，失败自动重试。"""
         while True:
             try:
+                await self._refresh_bot_roles()
                 await self._check_schedules()
                 await self._check_high_recall()
             except Exception as e:
@@ -859,6 +933,10 @@ class LLMGroupGuardPlugin(Star):
     async def _check_schedules(self):
         now = time.time()
         for gid in list(self.scheduler.all().keys()):
+            # 机器人非群主/管理员的群：定时禁言一律不执行
+            if not self._is_managed_group(gid):
+                self._warn_unmanaged(gid)
+                continue
             # 每群可能共存多个任务，逐个独立调度
             for sched in list(self.scheduler.get(gid)):
                 if not sched:
@@ -996,6 +1074,10 @@ class LLMGroupGuardPlugin(Star):
             try:
                 if not gconf.get("high_recall_enable"):
                     continue
+                # 机器人非群主/管理员的群：高召回不切换、不发送提示
+                if not self._is_managed_group(gid):
+                    self._warn_unmanaged(gid)
+                    continue
                 until = float(gconf.get("high_recall_manual_until") or 0)
                 if until and now < until:
                     continue  # 手动切换的临时状态未到期
@@ -1028,6 +1110,10 @@ class LLMGroupGuardPlugin(Star):
             user_id = str(raw.get("user_id") or "")
             if not group_id or not user_id or user_id == str(raw.get("operator_id") or ""):
                 return  # 无群/无用户，或为机器人自身进群时跳过
+            # 机器人非群主/管理员的群：不发送欢迎 / 改名提示（与其余设置保持一致）
+            if not self._is_managed_group(group_id):
+                self._warn_unmanaged(group_id)
+                return
 
             # 统一使用同一套欢迎词（join_welcome_msg）；有 OID（AI 审批缓存或名片提取）则带上
             cache_oid = (self._join_oid.get(group_id) or {}).get(user_id)
@@ -1086,15 +1172,19 @@ class LLMGroupGuardPlugin(Star):
             ):
                 return
             group_id = str(raw.get("group_id") or "")
-            gconf = self._gconf(group_id)
-            if not gconf.get("join_verify_enable"):
-                return  # 该群开关关闭则不自动审批
-
             user_id = str(raw.get("user_id") or "")
             flag = str(raw.get("flag") or "")
             comment = str(raw.get("comment") or "").strip()
             if not group_id or not user_id or not flag:
                 return
+            # 机器人非群主/管理员的群：不自动审批（与其余设置保持一致）
+            if not self._is_managed_group(group_id):
+                self._warn_unmanaged(group_id)
+                return
+
+            gconf = self._gconf(group_id)
+            if not gconf.get("join_verify_enable"):
+                return  # 该群开关关闭则不自动审批
 
             logger.info(f"[Guard] 收到入群申请: 群 {group_id} 用户 {user_id} 申请信息={comment!r}")
             verdict = await self.reviewer.judge_join_request(
@@ -1297,6 +1387,10 @@ class LLMGroupGuardPlugin(Star):
         if not group_id:
             return
         self._group_runtime[str(group_id)] = {"bot": event.bot}
+        # 机器人非群主/管理员的群：本插件全部设置不生效（不审核、不处置、不干预 AI 回复）
+        if not self._is_managed_group(group_id):
+            self._warn_unmanaged(group_id)
+            return
         gconf = self._gconf(group_id)
         # AI 回复范围开关：非群主/群管/机器人管理员且非白名单的消息不进入 AI 会话（含免@对话）
         # 仅阻止 AI 会话处理，不影响本插件审核/指令等功能
@@ -1320,7 +1414,9 @@ class LLMGroupGuardPlugin(Star):
         try:
             if not isinstance(event, AiocqhttpMessageEvent):
                 return
-            if not event.get_group_id():
+            group_id = event.get_group_id()
+            # 无群消息与非群主/管理员群一律不预审（与消息审核保持同一套开关）
+            if not group_id or not self._is_managed_group(group_id):
                 return
             violated = await self.guard.pre_review(event)
         except Exception as e:

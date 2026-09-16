@@ -50,6 +50,7 @@ const fromCsv = (s) => String(s || "").split(/[,，]/).map((x) => x.trim()).filt
 let groups = [];
 let currentGroup = "";
 let currentGroupName = "";
+let currentGroupManaged = true; // 机器人在当前群是否为群主/管理员
 let groupConfig = {};
 let astrbotProviders = [];
 
@@ -66,6 +67,26 @@ function toast(el, msg, isErr = false) {
 }
 function escapeHtml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/* ---------- 群权限：非群主/管理员的群，需要管理员权限的设置与按钮一律禁用 ---------- */
+function setGroupManaged(managed) {
+  currentGroupManaged = managed !== false;
+  $("managedWarn").classList.toggle("hidden", currentGroupManaged);
+}
+
+function lockControls(container, locked) {
+  if (!container) return;
+  container.querySelectorAll("input, select, textarea, button").forEach((el) => {
+    el.disabled = locked;
+  });
+  container.querySelectorAll(".toggle").forEach((el) => el.classList.toggle("locked", locked));
+}
+
+function managedBlocked(toastId, msg) {
+  if (currentGroupManaged) return false;
+  toast(toastId, msg || "该群机器人非群主/管理员，需要管理员权限的设置不可用", true);
+  return true;
 }
 
 /* ---------- tab 切换 ---------- */
@@ -178,7 +199,7 @@ async function openGroupPicker(force = false) {
   groups = (data && data.groups) || [];
   if (!groups.length) {
     $("groupList").innerHTML =
-      '<div class="empty">暂无可管理群<br><span style="font-size:12px">机器人需为群主或群管理员才能被管理</span></div>' +
+      '<div class="empty">机器人暂未加入任何群<br><span style="font-size:12px">请先让机器人加入群聊后再重新检测</span></div>' +
       '<div class="actions" style="justify-content:center;margin-top:4px"><button class="btn primary" id="retryGroups">重新检测</button></div>';
     $("retryGroups").addEventListener("click", () => openGroupPicker(true));
     return;
@@ -186,14 +207,17 @@ async function openGroupPicker(force = false) {
   $("groupList").innerHTML = "";
   groups.forEach((g) => {
     const item = document.createElement("div");
-    item.className = "group-item";
+    item.className = "group-item" + (g.managed ? "" : " unmanaged");
+    // 身份徽章：群主 / 管理员可管理；普通成员群仅可查看（设置将禁用）
     const roleBadge = g.role === "owner"
       ? '<span class="badge red">群主</span>'
-      : '<span class="badge blue">管理员</span>';
+      : g.role === "admin"
+      ? '<span class="badge blue">管理员</span>'
+      : '<span class="badge warn">非管理员</span>';
     item.innerHTML =
       `<div class="g-name">${escapeHtml(g.group_name || g.group_id)}</div>` +
       `<div class="g-meta"><span class="badge">${g.group_id}</span>${roleBadge}</div>`;
-    item.addEventListener("click", () => selectGroup(g.group_id, g.group_name));
+    item.addEventListener("click", () => selectGroup(g.group_id, g.group_name, g.managed));
     $("groupList").appendChild(item);
   });
 }
@@ -205,11 +229,13 @@ function renderGroupError(msg) {
   $("retryGroups").addEventListener("click", () => openGroupPicker(true));
 }
 
-async function selectGroup(gid, name) {
+async function selectGroup(gid, name, managed) {
   currentGroup = gid;
   currentGroupName = name || gid;
+  setGroupManaged(managed);
   $("groupModal").classList.remove("show");
-  $("currentGroup").textContent = `${currentGroupName}（${currentGroup}）`;
+  $("currentGroup").textContent =
+    `${currentGroupName}（${currentGroup}）` + (currentGroupManaged ? "" : " · 非管理员");
   await loadConfig();
   renderCopySource();
   loadSchedules();
@@ -235,6 +261,7 @@ function renderConfigForm() {
         (f.hint ? `<div class="t-hint">${f.hint}</div>` : "") + `</div>` +
         `<div class="toggle ${val ? "on" : ""}" data-key="${f.key}"></div></div>`;
       el.querySelector(".toggle").addEventListener("click", (e) => {
+        if (e.currentTarget.classList.contains("locked")) return; // 非管理群：设置只读
         e.currentTarget.classList.toggle("on");
       });
     } else if (f.type === "select") {
@@ -260,6 +287,7 @@ function renderConfigForm() {
     }
     grid.appendChild(el);
   });
+  lockControls($("page-config"), !currentGroupManaged); // 非管理群：设置与按钮只读
 }
 
 function collectGroupConfig() {
@@ -292,6 +320,7 @@ let copyArmed = null;
 
 $("copyConfig").addEventListener("click", async () => {
   const btn = $("copyConfig");
+  if (managedBlocked("copyToast", "该群机器人非群主/管理员，无法修改配置")) return;
   const src = $("copySource").value;
   if (!src) return toast("copyToast", "请选择要同步的源群", true);
   const srcName = ($("copySource").selectedOptions[0] || {}).textContent || src;
@@ -342,6 +371,7 @@ async function loadConfig() {
 
 $("saveConfig").addEventListener("click", async () => {
   const btn = $("saveConfig");
+  if (managedBlocked("configToast")) return;
   btn.disabled = true;
   try {
     await api("config/save", "POST", { group_id: currentGroup, group: collectGroupConfig() });
@@ -497,12 +527,14 @@ function renderSchedules(data) {
       `<td><button class="btn ghost sm danger" data-id="${s.id || ""}">删除</button></td>`;
     tr.querySelector("button").addEventListener("click", async (e) => {
       const b = e.currentTarget;
+      if (managedBlocked("scheduleToast", "该群机器人非群主/管理员，无法删除定时任务")) return;
       await api("schedules/delete", "POST", { group_id: currentGroup, task_id: b.dataset.id });
       toast("scheduleToast", "已删除");
       loadSchedules();
     });
     tbody.appendChild(tr);
   });
+  lockControls($("page-schedules"), !currentGroupManaged); // 非管理群：定时任务表单与按钮只读
 }
 
 async function loadSchedules() {
@@ -511,6 +543,7 @@ async function loadSchedules() {
 
 // 定时禁言表单作用于当前选择的群
 $("setSchedule").addEventListener("click", async () => {
+  if (managedBlocked("scheduleToast", "该群机器人非群主/管理员，定时禁言不可用")) return;
   const payload = {
     group_id: currentGroup,
     mode: $("sMode").value,
@@ -542,6 +575,7 @@ function bindToggle(el, on) {
   el.addEventListener("click", toggleHandler);
 }
 function toggleHandler(e) {
+  if (e.currentTarget.classList.contains("locked")) return; // 非管理群：设置只读
   e.currentTarget.classList.toggle("on");
 }
 
@@ -580,8 +614,10 @@ async function loadJoin() {
   $("joinWelcome").value = g.join_welcome_msg || "";
   $("joinCardNotifyMsg").value = g.join_card_notify_msg || "";
   $("joinCardNotifyFailMsg").value = g.join_card_notify_fail_msg || "";
+  lockControls($("page-join"), !currentGroupManaged); // 非管理群：审批设置只读
 }
 $("saveJoin").addEventListener("click", async () => {
+  if (managedBlocked("joinToast", "该群机器人非群主/管理员，入群审批不可用")) return;
   const payload = {
     join_verify_enable: $("joinVerifyToggle").classList.contains("on"),
     join_llm_chat: $("joinLlmChat").value,
@@ -646,9 +682,11 @@ async function loadHighRecall() {
   $("hrOnMsg").value = g.high_recall_on_msg || "";
   $("hrOffMsg").value = g.high_recall_off_msg || "";
   renderHrStatus(g);
+  lockControls($("page-hr"), !currentGroupManaged); // 非管理群：高召回设置与按钮只读
 }
 
 $("saveHr").addEventListener("click", async () => {
+  if (managedBlocked("hrToast", "该群机器人非群主/管理员，高召回模式不可用")) return;
   const payload = {
     high_recall_enable: $("hrEnableToggle").classList.contains("on"),
     high_recall_start: $("hrStart").value.trim(),
@@ -670,6 +708,7 @@ $("saveHr").addEventListener("click", async () => {
 });
 
 async function setHrManual(active) {
+  if (managedBlocked("hrToast", "该群机器人非群主/管理员，高召回模式不可用")) return;
   try {
     await api("high-recall/set", "POST", { group_id: currentGroup, active });
     toast("hrToast", active ? "已立即开启高召回模式" : "已立即关闭高召回模式");
