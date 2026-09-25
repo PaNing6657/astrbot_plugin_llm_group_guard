@@ -64,6 +64,8 @@ class MessageGuard:
         self._sem = asyncio.Semaphore(2)  # 限制 LLM 审核并发
         # 最近已完整审过的消息键（预审与后台共用，防止同一消息被处理两次）
         self._handled: list[str] = []
+        # 最近消息到达时的 LLM 开关状态，预审与后台审核使用同一快照
+        self._llm_arrival_state: dict[str, bool] = {}
         # 旧版统一关键词计数并入轻度（仅当轻/重计数均为空时执行一次）
         self._merge_legacy_keyword_counts()
 
@@ -81,9 +83,21 @@ class MessageGuard:
             minor.save()
 
     def schedule(self, event: AiocqhttpMessageEvent) -> None:
-        """后台执行审核，不阻塞消息事件处理。"""
+        """后台执行审核，不阻塞消息事件处理。
+
+        记录消息进入插件时的 LLM 开关状态，避免开关关闭期间到达、但因任务
+        调度延迟到开关重新打开后才处理的消息被补审。关键词审核仍按原逻辑执行。
+        """
+        group_id = event.get_group_id()
+        gconf = self._gconf_provider(group_id) if self._gconf_provider else self.config
+        llm_enabled_at_arrival = bool(gconf.get("guard_enable"))
+        key = self._msg_key(event)
+        self._llm_arrival_state[key] = llm_enabled_at_arrival
+        if len(self._llm_arrival_state) > 300:
+            for stale_key in list(self._llm_arrival_state)[:-300]:
+                self._llm_arrival_state.pop(stale_key, None)
         try:
-            asyncio.create_task(self._guarded(event))
+            asyncio.create_task(self._guarded(event, llm_enabled_at_arrival))
         except RuntimeError as exc:
             logger.error(f"[MessageGuard] 无法创建审核任务（不在事件循环中）: {exc}")
 
@@ -96,15 +110,20 @@ class MessageGuard:
         """
         try:
             async with self._sem:
-                return await self._handle(event, preview=True)
+                key = self._msg_key(event)
+                return await self._handle(
+                    event,
+                    preview=True,
+                    llm_enabled_at_arrival=self._llm_arrival_state.get(key),
+                )
         except Exception as exc:
             logger.error(f"[MessageGuard] 预审异常: {exc}")
             return False
 
-    async def _guarded(self, event: AiocqhttpMessageEvent) -> None:
+    async def _guarded(self, event: AiocqhttpMessageEvent, llm_enabled_at_arrival=None) -> None:
         try:
             async with self._sem:
-                await self._handle(event)
+                await self._handle(event, llm_enabled_at_arrival=llm_enabled_at_arrival)
         except Exception as exc:
             logger.error(f"[MessageGuard] 审核异常: {exc}")
 
@@ -195,7 +214,12 @@ class MessageGuard:
                     urls.append(u)
         return urls[:3]
 
-    async def _handle(self, event: AiocqhttpMessageEvent, preview: bool = False) -> bool:
+    async def _handle(
+        self,
+        event: AiocqhttpMessageEvent,
+        preview: bool = False,
+        llm_enabled_at_arrival=None,
+    ) -> bool:
         """完整审核一条消息（关键字/LLM+处置），返回 True 表示违规（应拦截回复）。
 
         preview=True 为回复前预审：只检测轻/重违规词，命中即返回 True 供调用方
@@ -265,8 +289,12 @@ class MessageGuard:
         if preview:
             return False  # 预审只做关键词拦截，LLM 审核仍由后台任务完整执行
 
-        # LLM 审核：独立开关，与关键词检测互不影响；高召回模式生效时换用另一套规则与模型
-        if not gconf.get("guard_enable"):
+        # LLM 审核：独立开关，与关键词检测互不影响；高召回模式生效时换用另一套规则与模型。
+        # 后台任务使用消息到达时的开关状态，避免关闭期间的旧消息在重新开启后被补审；
+        # 预审没有到达状态参数，沿用当前开关状态。
+        if llm_enabled_at_arrival is None:
+            llm_enabled_at_arrival = bool(gconf.get("guard_enable"))
+        if not gconf.get("guard_enable") or not llm_enabled_at_arrival:
             return False
         settings = self._llm_review_settings(gconf)
         mode_note = "（高召回模式）" if settings["high_recall"] else ""
