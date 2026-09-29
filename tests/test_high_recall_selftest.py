@@ -221,6 +221,23 @@ async def case_plugin_schedule_and_notice():
     assert not plugin._hr_pending and sent and "开启" in sent[-1][1], (plugin._hr_pending, sent)
     print("[ok] 无连接时提示排队，连接恢复后补发")
 
+    # 插件启动时平台客户端尚未就绪，调度触发时应重新从平台管理器查找
+    scheduled_calls = []
+
+    class _ScheduledBot:
+        class _Api:
+            async def call_action(self, action, **kwargs):
+                scheduled_calls.append((action, kwargs))
+
+        api = _Api()
+
+    plugin._platform_bot = None
+    plugin._get_any_bot = lambda: _ScheduledBot()
+    ok, message = await plugin._apply_scheduled("10001", {}, enable=True)
+    assert ok and scheduled_calls and scheduled_calls[-1][0] == "set_group_whole_ban", (ok, message, scheduled_calls)
+    assert plugin._platform_bot is not None
+    print("[ok] 调度执行时动态发现平台客户端并执行全体禁言")
+
     # 手动切换：时段外开启不被调度改回，到下一个定时节点交还定时规则
     await plugin._set_high_recall("10001", False)
     sent.clear()

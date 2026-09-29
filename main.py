@@ -904,12 +904,12 @@ class LLMGroupGuardPlugin(Star):
     async def _apply_scheduled(self, group_id, sched: dict, enable: bool) -> tuple[bool, str]:
         """按调度任务执行一次开关，bot 连接信息从任务/群缓存/平台兜底依次获取。"""
         runtime = self._group_runtime.get(str(group_id)) or {}
-        bot = (
-            sched.get("bot")
-            or runtime.get("bot")
-            or getattr(self, "_platform_bot", None)
-        )
-        if not bot:
+        bot = sched.get("bot") or runtime.get("bot") or getattr(self, "_platform_bot", None)
+        if bot is None:
+            bot = self._get_any_bot()
+            if bot is not None:
+                self._platform_bot = bot
+        if bot is None:
             return False, "缺少机器人连接信息，等待下一次调度重试"
         return await self._change_whole_ban(
             group_id=group_id,

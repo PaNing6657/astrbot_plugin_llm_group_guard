@@ -97,13 +97,43 @@ function managedBlocked(toastId, msg) {
   return true;
 }
 
+/* ---------- 窄屏表格横滑：显示可滑动提示 ---------- */
+function syncTableOverflow(wrap) {
+  const max = wrap.scrollWidth - wrap.clientWidth;
+  const overflowing = max > 2;
+  wrap.classList.toggle("overflowing", overflowing);
+  wrap.classList.toggle("at-start", overflowing && wrap.scrollLeft <= 2);
+  wrap.classList.toggle("at-end", overflowing && wrap.scrollLeft >= max - 2);
+}
+function bindTableOverflow(root) {
+  (root || document).querySelectorAll(".table-wrap").forEach((wrap) => {
+    if (wrap._overflowBound) syncTableOverflow(wrap);
+    else {
+      wrap._overflowBound = true;
+      wrap.addEventListener("scroll", () => syncTableOverflow(wrap), { passive: true });
+      syncTableOverflow(wrap);
+    }
+  });
+}
+window.addEventListener("resize", () => bindTableOverflow());
+window.addEventListener("orientationchange", () => setTimeout(() => bindTableOverflow(), 250));
+
 /* ---------- tab 切换 ---------- */
+// 窄屏 tab 栏为单行横向滚动：切换后把选中项滚入可视区（只动横向，不干扰页面纵向位置）
+function revealTab(btn) {
+  const nav = btn.parentElement;
+  if (!nav || nav.scrollWidth <= nav.clientWidth + 1) return;
+  const left = btn.offsetLeft - (nav.clientWidth - btn.offsetWidth) / 2;
+  nav.scrollTo({ left: Math.max(0, left), behavior: "smooth" });
+}
+
 document.querySelectorAll(".tab").forEach((btn) => {
   btn.addEventListener("click", () => {
     document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
     document.querySelectorAll(".page").forEach((p) => p.classList.remove("active"));
     btn.classList.add("active");
     $("page-" + btn.dataset.tab).classList.add("active");
+    revealTab(btn);
     if (btn.dataset.tab === "violations") loadViolations();
     if (btn.dataset.tab === "schedules") loadSchedules();
     if (btn.dataset.tab === "join") loadJoin();
@@ -160,6 +190,7 @@ function renderLocalData(data) {
     });
     tbody.appendChild(tr);
   });
+  bindTableOverflow();
 }
 
 async function loadLocalData() {
@@ -257,7 +288,8 @@ $("switchGroup").addEventListener("click", () => openGroupPicker(false));
 /* ---------- 配置表单 ---------- */
 function renderConfigForm() {
   const wrap = $("configForm");
-  wrap.innerHTML = '<div class="form-grid" style="grid-template-columns:1fr 1fr 1fr"></div>';
+  // 列数交给 CSS（桌面 3 列 / 窄屏自动降为 1 列），避免内联样式压过响应式断点
+  wrap.innerHTML = '<div class="form-grid wide"></div>';
   const grid = wrap.firstElementChild;
   GROUP_FIELDS.forEach((f) => {
     const el = document.createElement("div");
@@ -450,6 +482,7 @@ function renderViolations(data) {
     });
     tbody.appendChild(tr);
   });
+  bindTableOverflow();
 }
 
 function showViolationHistory(uid) {
@@ -542,6 +575,7 @@ function renderSchedules(data) {
     tbody.appendChild(tr);
   });
   lockControls($("page-schedules"), !currentGroupManaged); // 非管理群：定时任务表单与按钮只读
+  bindTableOverflow();
 }
 
 async function loadSchedules() {
@@ -741,4 +775,5 @@ $("hrManualOff").addEventListener("click", () => setHrManual(false));
   }
   // 进入页面先选择管理群
   openGroupPicker(false);
+  bindTableOverflow();
 })();
