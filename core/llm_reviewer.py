@@ -65,6 +65,8 @@ _RISK_KEYWORDS = (
 )
 
 _MAX_IMAGES = 3  # 单条消息最多送审的图片数
+_MAX_MSG_CHARS = 2000  # 单条消息最多送审的字数
+_MAX_BATCH_CHARS = 8000  # 合并审核时整批消息正文的长度上限
 
 
 def extract_json_object(content: str) -> Optional[dict]:
@@ -264,18 +266,68 @@ class LLMReviewer:
     ) -> Optional[dict]:
         """判定一条群消息（可含图片）是否违规。违规时 allowed 为 false。
 
+        单条审核：直接复用批量审核接口，仅消息条数为 1。
+        """
+        return await self.judge_messages(
+            sender,
+            [text],
+            prompt=prompt,
+            chat_id=chat_id,
+            fallback_chat_id=fallback_chat_id,
+            image_urls=image_urls,
+            ocr_chat_id=ocr_chat_id,
+        )
+
+    @staticmethod
+    def _format_batch(sender: str, texts: list) -> str:
+        """把一批（合并审核的）消息格式化为送审正文，保留序号与到达顺序。
+
+        单条消息沿用原有格式（最多送审 _MAX_MSG_CHARS 字）；多条消息逐条编号，
+        整批正文超过 _MAX_BATCH_CHARS 时截断，并在尾部说明"内容不完整"，
+        避免模型把"没看到"当成"没违规"。
+        """
+        items = [str(t or "").strip()[:_MAX_MSG_CHARS] for t in (texts or [])]
+        if not items:
+            items = [""]
+        if len(items) == 1:
+            body = items[0] if items[0] else "[纯图片消息]"
+            return f"发言者：{sender}\n消息内容：{body}"
+        lines = []
+        for index, text in enumerate(items, 1):
+            lines.append(f"{index}. {text if text else '[图片消息]'}")
+        body = "\n".join(lines)
+        if len(body) > _MAX_BATCH_CHARS:
+            body = body[:_MAX_BATCH_CHARS] + "\n…（内容过长已截断，后续消息未完整展示）"
+        return (
+            f"发言者：{sender}\n"
+            f"该成员在短时间内连续发送了 {len(items)} 条消息（按发送顺序编号）：\n{body}\n"
+            "请把这些消息作为整体上下文一起判断：其中任意一条违规即整体判为违规，"
+            "判定违规时该区间内的这些消息会被一并撤回。"
+        )
+
+    async def judge_messages(
+        self,
+        sender: str,
+        texts: list,
+        prompt: str = "",
+        chat_id: str = "",
+        fallback_chat_id: str = "",
+        image_urls: list = None,
+        ocr_chat_id: str = "",
+    ) -> Optional[dict]:
+        """判定一批（同一成员短时间内连续发送的）群消息是否违规。
+
         prompt 为该群自定义审核要求（guard_prompt，由调用方传入），完全由用户定义、
         无内置默认话术；未填写时系统提示仅保留 JSON 输出格式约束。
         chat_id 为该群选用的 AstrBot 聊天模型，fallback_chat_id 为备用模型；
-        image_urls 为消息中的图片，ocr_chat_id 为识图审核模型（审核模型不识图时由它
-        直接带图出判定）。当模型输出触发风控特征时，返回带 source="risk_block" 的
+        image_urls 为这批消息中的图片，ocr_chat_id 为识图审核模型（审核模型不识图时
+        由它直接带图出判定）。当模型输出触发风控特征时，返回带 source="risk_block" 的
         疑似违规判定；其余失败返回 None。
         """
         wanted = str(prompt or "").strip()
         # 不内置任何默认提示词：自定义要求非空时拼在格式约束前，为空则仅输出格式约束
         system = f"{wanted}\n{_JSON_RULE}" if wanted else _JSON_RULE
-        content = text[:2000] if (text or "").strip() else "[纯图片消息]"
-        user = f"发言者：{sender}\n消息内容：{content}"
+        user = self._format_batch(sender, texts)
         result = await self._ask(
             chat_id, fallback_chat_id, system, user,
             image_urls=image_urls, ocr_chat_id=ocr_chat_id,

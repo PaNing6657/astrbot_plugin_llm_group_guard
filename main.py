@@ -53,9 +53,13 @@ DEFAULT_GROUP_CONFIG = {
     "guard_stair_max_seconds": 86400,
     "guard_recall_ban_threshold": 3,
     "guard_interval": 30,
+    # 消息合并审核：同一成员连发消息攒成一批，静默满合窗后整批送 LLM，违规整批撤回
+    "guard_merge_enable": False,  # 开启后按合窗攒批审核（取代逐条审核）
+    "guard_merge_window": 10,  # 合窗秒数：每次收到新消息重置倒计时，静默满该秒数后送审
+    "guard_merge_max": 50,  # 单批条数上限：达到上限立即送审（0=不限制），防超长刷屏拖延审核
     "guard_risk_as_violation": True,
     "guard_prompt": "",
-    "guard_notice": "",  # 违规通知，支持 {at_user} {nickname} {user_id} {duration} {count}，留空不发送
+    "guard_notice": "",  # 违规通知，支持 {at_user} {nickname} {user_id} {duration} {count} {messages}，留空不发送
     "keyword_guard_enable": False,
     # 关键词检测完全独立于 LLM 审核：轻/重两级各自拥有处置方式与阶梯禁言设置
     "keyword_list": [],  # 旧字段：兼容迁移为轻度违规词
@@ -278,6 +282,9 @@ class LLMGroupGuardPlugin(Star):
                 merged = dict(gconf)
                 merged.update(allowed)
                 error = self._validate_high_recall(merged)
+                if error:
+                    return error_response(error)
+                error = self._validate_merge(merged)
                 if error:
                     return error_response(error)
                 was_hr_enabled = bool(gconf.get("high_recall_enable"))
@@ -859,6 +866,7 @@ class LLMGroupGuardPlugin(Star):
 
     async def terminate(self):
         await self.reviewer.close()
+        self.guard.close()  # 丢弃未完成的合并审核批次，避免热重载后残留任务
         if self._scheduler_task:
             self._scheduler_task.cancel()
 
@@ -1015,6 +1023,24 @@ class LLMGroupGuardPlugin(Star):
         if not gconf.get("high_recall_enable"):
             return None
         return validate_high_recall_times(gconf.get("high_recall_start"), gconf.get("high_recall_end"))
+
+    @staticmethod
+    def _validate_merge(gconf: dict) -> Optional[str]:
+        """校验消息合并审核配置：未开启合并或合窗为正数时返回 None。"""
+        if not gconf.get("guard_merge_enable"):
+            return None
+        raw = gconf.get("guard_merge_window")
+        if raw in (None, ""):
+            return "开启消息合并审核需填写合并窗口时长（秒）"
+        try:
+            window = float(str(raw).strip())
+        except (TypeError, ValueError):
+            return "消息合并窗口应为秒数（如 10）"
+        if window <= 0:
+            return "消息合并窗口必须大于 0 秒"
+        if window > 600:
+            return "消息合并窗口过长（最多 600 秒），建议 5-30 秒"
+        return None
 
     async def _set_high_recall(self, group_id, active: bool, manual: bool = False) -> bool:
         """切换高召回状态并落盘；状态实际变化时发送开关提示（无连接时排队补发）。"""
