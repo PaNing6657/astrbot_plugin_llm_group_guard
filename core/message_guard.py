@@ -19,7 +19,7 @@ from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
     AiocqhttpMessageEvent,
 )
 
-from .llm_reviewer import LLMReviewer
+from .llm_reviewer import _MAX_IMAGES, LLMReviewer
 from .merge_buffer import MergedBatch, MergeBuffer
 from .text_utils import build_text_with_at
 from .violation_tracker import (
@@ -466,13 +466,20 @@ class MessageGuard:
 
     @staticmethod
     def _collect_image_urls(events: list, extractor) -> list:
-        """汇总整批消息的图片 URL（去重、保序）；返回 [url, ...] 供审核模型带图。"""
-        urls: list = []
-        for event in events:
-            for url in extractor(event):
-                if url not in urls:
-                    urls.append(url)
-        return urls
+        """汇总整批消息随审的图片 URL（去重、按消息到达顺序返回）。
+
+        从**最新**的消息往前取，凑满 _MAX_IMAGES 张即止：合并批次可能攒下十几条消息，
+        若从头取会把最新的图挤掉，而最新的图恰恰最需要审核（例如先发文字铺垫、
+        最后才发违规图）。返回顺序仍按到达顺序，方便模型对照编号理解上下文。
+        """
+        picked: list = []  # 由新到旧累积
+        for event in reversed(events):
+            for url in reversed(list(extractor(event))):
+                if url not in picked:
+                    picked.append(url)
+            if len(picked) >= _MAX_IMAGES:
+                break
+        return list(reversed(picked))[:_MAX_IMAGES]
 
     async def _flush_batch(self, batch: MergedBatch) -> None:
         """合并缓冲倒计时结束：把整批消息交给 LLM 审核，违规则整批撤回/禁言。

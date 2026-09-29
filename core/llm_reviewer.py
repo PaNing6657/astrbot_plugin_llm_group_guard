@@ -320,14 +320,23 @@ class LLMReviewer:
         prompt 为该群自定义审核要求（guard_prompt，由调用方传入），完全由用户定义、
         无内置默认话术；未填写时系统提示仅保留 JSON 输出格式约束。
         chat_id 为该群选用的 AstrBot 聊天模型，fallback_chat_id 为备用模型；
-        image_urls 为这批消息中的图片，ocr_chat_id 为识图审核模型（审核模型不识图时
-        由它直接带图出判定）。当模型输出触发风控特征时，返回带 source="risk_block" 的
-        疑似违规判定；其余失败返回 None。
+        image_urls 为这批消息中的图片（与文本一起送审，识图模型直接看图判定），
+        ocr_chat_id 为识图审核模型（审核模型不识图时由它直接带图出判定）。
+        当模型输出触发风控特征时，返回带 source="risk_block" 的疑似违规判定；
+        其余失败返回 None。
         """
         wanted = str(prompt or "").strip()
         # 不内置任何默认提示词：自定义要求非空时拼在格式约束前，为空则仅输出格式约束
         system = f"{wanted}\n{_JSON_RULE}" if wanted else _JSON_RULE
         user = self._format_batch(sender, texts)
+        image_urls = list(image_urls or [])
+        if image_urls and self._vision_available(chat_id, ocr_chat_id):
+            # 图片随文本一起送审，需说明图片与编号消息的对应关系，避免模型误判上下文
+            shown = min(len(image_urls), _MAX_IMAGES)
+            note = f"[本批消息附带了 {shown} 张图片，按发送时间先后排列，请一并审核图片内容]"
+            if len(image_urls) > shown:
+                note += f"（另有 {len(image_urls) - shown} 张图片超出单次送审上限未附上）"
+            user = f"{user}\n{note}"
         result = await self._ask(
             chat_id, fallback_chat_id, system, user,
             image_urls=image_urls, ocr_chat_id=ocr_chat_id,
@@ -339,6 +348,15 @@ class LLMReviewer:
                 "source": "risk_block",
             }
         return result
+
+    def _vision_available(self, chat_id: str, ocr_chat_id: str) -> bool:
+        """本次送审是否真的会带图（与 _ask/_ask_one 的带图条件保持一致）。"""
+        if not _MULTIMODAL_OK:
+            return False
+        if self.model_supports_image(chat_id):
+            return True
+        ocr = (ocr_chat_id or "").strip()
+        return bool(ocr and ocr != chat_id)
 
     async def judge_join_request(
         self,
