@@ -13,6 +13,12 @@ from astrbot.api.web import error_response, json_response, request
 from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import AiocqhttpMessageEvent
 from astrbot.core.star.star_tools import StarTools
 
+from .core.card_lock import (
+    CardLockEngine,
+    find_lock_rule,
+    normalize_lock_rules,
+    validate_lock_rule,
+)
 from .core.event_utils import unwrap_event
 from .core.high_recall import (
     high_recall_window,
@@ -91,6 +97,14 @@ DEFAULT_GROUP_CONFIG = {
     "join_card_notify": True,
     "join_card_notify_msg": "已自动将 {nickname} 的群名片修改为 {new_card}",
     "join_card_notify_fail_msg": "",
+    # 群名片锁定：把指定成员的群名片固定为指定值，被改动后自动改回
+    "card_lock_enable": False,
+    # 锁定规则列表：[{"user_id": "QQ号", "card": "锁定名片", "note": "备注"}]
+    "card_lock_list": [],
+    "card_lock_notify": True,
+    "card_lock_notify_msg": "🔒 {at_user} 的群名片已被锁定，已恢复为「{card}」",
+    "card_lock_poll_enable": False,  # 定时轮询兜底：事件丢失时按间隔比对恢复
+    "card_lock_poll_interval": 300,  # 轮询间隔（秒），最小 60
     # 高召回模式：每日定时切换到另一套审核规则与单独选择的模型
     "high_recall_enable": False,  # 每日定时开关
     "high_recall_start": "",  # 每日开启时间 HH:MM
@@ -231,6 +245,19 @@ class LLMGroupGuardPlugin(Star):
         # 平台级 bot 客户端兜底：插件重启后即使群里无新消息也能执行定时任务
         self._platform_bot = None
         self._scheduler_task: Optional[asyncio.Task] = None
+        # 群名片锁定引擎：原生 group_card 事件驱动 + 轮询兜底
+        self.card_locker = CardLockEngine(
+            logger,
+            gconf_provider=self._gconf,
+            is_managed=self._is_managed_group,
+            client_provider=self._get_any_bot,
+            warn_unmanaged=self._warn_unmanaged,
+            groups_provider=lambda: self.config.get("groups") or {},
+        )
+        # 已注册原生 notice 回调的 bot 标识，避免平台重载时重复注册
+        self._notice_bots: set[int] = set()
+        # 各群最近一次名片锁定轮询时间戳（按群独立节流）
+        self._card_lock_polled_at: dict[str, float] = {}
         self._register_web_apis()
 
     # ------------------------------------------------------------------
@@ -252,6 +279,11 @@ class LLMGroupGuardPlugin(Star):
         self.context.register_web_api(f"{base}/local-data", self.web_local_data, ["GET"], "本地持久化数据概览")
         self.context.register_web_api(f"{base}/local-data/delete", self.web_local_data_delete, ["POST"], "删除指定群的全部本地数据")
         self.context.register_web_api(f"{base}/local-data/clear", self.web_local_data_clear, ["POST"], "清空全部本地数据")
+        self.context.register_web_api(f"{base}/card-lock/list", self.web_card_lock_list, ["GET"], "群名片锁定规则列表")
+        self.context.register_web_api(f"{base}/card-lock/set", self.web_card_lock_set, ["POST"], "新增或更新群名片锁定规则")
+        self.context.register_web_api(f"{base}/card-lock/delete", self.web_card_lock_delete, ["POST"], "删除群名片锁定规则")
+        self.context.register_web_api(f"{base}/card-lock/apply", self.web_card_lock_apply, ["POST"], "立即对某成员执行一次名片锁定")
+        self.context.register_web_api(f"{base}/card-lock/sync", self.web_card_lock_sync, ["POST"], "读取群成员当前名片用于回填")
 
     async def web_get_config(self):
         # GET /config?group_id=X：返回全局配置 + 该群配置
@@ -405,6 +437,9 @@ class LLMGroupGuardPlugin(Star):
         for key in _LIST_CONFIG_KEYS:
             if key in gconf:
                 gconf[key] = _normalize_list_value(gconf[key])
+        # 名片锁定规则是 dict 列表，必须走专用规范化（普通列表规范化会把它压成字符串）
+        if "card_lock_list" in gconf:
+            gconf["card_lock_list"] = normalize_lock_rules(gconf.get("card_lock_list"))
 
     @staticmethod
     def _migrate_legacy_keywords(gconf: dict) -> None:
@@ -625,6 +660,195 @@ class LLMGroupGuardPlugin(Star):
         logger.info("[Guard] 已清空全部本地持久化数据")
         return json_response({"cleared": True, "groups": self._local_data_index()})
 
+    # ------------------------------------------------------------------
+    # WebUI：群名片锁定规则管理
+    # ------------------------------------------------------------------
+    async def web_card_lock_list(self):
+        """GET /{base}/card-lock/list?group_id=X：返回该群锁定规则与当前名片状态。"""
+        gid = str(request.query.get("group_id") or "").strip()
+        if not gid:
+            return error_response("缺少 group_id 参数")
+        gconf = self._gconf(gid)
+        rules = normalize_lock_rules(gconf.get("card_lock_list"))
+        managed = self._is_managed_group(gid)
+        # 附带每个锁定成员的当前名片，便于前端显示"已偏离/正常"
+        current: dict[str, dict] = {}
+        if rules and managed:
+            bot = self._get_any_bot()
+            if bot is not None:
+                for rule in rules:
+                    try:
+                        info = await bot.api.call_action(
+                            "get_group_member_info",
+                            group_id=int(gid),
+                            user_id=int(rule["user_id"]),
+                        )
+                    except Exception:
+                        continue
+                    if isinstance(info, dict):
+                        current[rule["user_id"]] = {
+                            "card": str(info.get("card") or "").strip(),
+                            "nickname": str(info.get("nickname") or "").strip(),
+                        }
+        return json_response({
+            "rules": rules,
+            "managed": managed,
+            "enable": bool(gconf.get("card_lock_enable")),
+            "notify": bool(gconf.get("card_lock_notify", True)),
+            "notify_msg": str(gconf.get("card_lock_notify_msg") or ""),
+            "poll_enable": bool(gconf.get("card_lock_poll_enable")),
+            "poll_interval": int(gconf.get("card_lock_poll_interval") or 300),
+            "current": current,
+        })
+
+    async def web_card_lock_set(self):
+        """POST /{base}/card-lock/set：新增或更新一条锁定规则（按 QQ 号覆盖）。"""
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象")
+        gid = str(payload.get("group_id") or "").strip()
+        if not gid:
+            return error_response("缺少 group_id 参数")
+        if not self._is_managed_group(gid):
+            self._warn_unmanaged(gid)
+            return error_response("该群机器人非群主/管理员，无法使用名片锁定功能")
+        user_id = payload.get("user_id")
+        card = payload.get("card")
+        note = str(payload.get("note") or "").strip()
+        error = validate_lock_rule(user_id, card)
+        if error:
+            return error_response(error)
+        uid = str(user_id).strip()
+        card = str(card).strip()
+        gconf = self._gconf(gid)
+        rules = [
+            r for r in normalize_lock_rules(gconf.get("card_lock_list")) if r["user_id"] != uid
+        ]
+        rules.append({"user_id": uid, "card": card, "note": note})
+        # 开启总开关：只加规则不打开开关对用户无意义，这里自动启用
+        gconf["card_lock_list"] = rules
+        gconf["card_lock_enable"] = True
+        try:
+            self._save_config()
+        except Exception as e:
+            logger.error(f"[Guard] 保存名片锁定规则失败: 群 {gid}: {e}")
+            return error_response(f"保存失败：{e}")
+        logger.info(f"[Guard] 群 {gid} 已锁定成员 {uid} 的群名片为「{card}」")
+
+        # 若勾选了立即生效，则当场执行一次恢复
+        applied = None
+        if payload.get("apply_now"):
+            rule = find_lock_rule(rules, uid)
+            ok, message = await self.card_locker.enforce(
+                gid, rule, reason="webui", nickname_hint=str(payload.get("nickname") or "")
+            )
+            applied = {"ok": ok, "message": message}
+            if not ok:
+                return error_response(f"规则已保存，但立即执行失败：{message}")
+        return json_response({
+            "saved": True,
+            "applied": applied,
+            "rules": rules,
+            "enable": bool(gconf.get("card_lock_enable")),
+        })
+
+    async def web_card_lock_delete(self):
+        """POST /{base}/card-lock/delete：按 QQ 号删除一条锁定规则。"""
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象")
+        gid = str(payload.get("group_id") or "").strip()
+        uid = str(payload.get("user_id") or "").strip()
+        if not gid:
+            return error_response("缺少 group_id 参数")
+        if not uid:
+            return error_response("缺少 user_id 参数")
+        gconf = self._gconf(gid)
+        before = normalize_lock_rules(gconf.get("card_lock_list"))
+        rules = [r for r in before if r["user_id"] != uid]
+        if len(rules) == len(before):
+            return error_response("未找到该成员的锁定规则")
+        gconf["card_lock_list"] = rules
+        try:
+            self._save_config()
+        except Exception as e:
+            logger.error(f"[Guard] 删除名片锁定规则失败: 群 {gid}: {e}")
+            return error_response(f"删除失败：{e}")
+        logger.info(f"[Guard] 群 {gid} 已解除成员 {uid} 的群名片锁定")
+        return json_response({"deleted": True, "rules": rules})
+
+    async def web_card_lock_apply(self):
+        """POST /{base}/card-lock/apply：对某成员（或整群）立即执行一次锁定恢复。"""
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象")
+        gid = str(payload.get("group_id") or "").strip()
+        if not gid:
+            return error_response("缺少 group_id 参数")
+        if not self._is_managed_group(gid):
+            self._warn_unmanaged(gid)
+            return error_response("该群机器人非群主/管理员，无法使用名片锁定功能")
+        rules = normalize_lock_rules(self._gconf(gid).get("card_lock_list"))
+        if not rules:
+            return error_response("该群尚未配置任何名片锁定规则")
+        uid = str(payload.get("user_id") or "").strip()
+        targets = [r for r in rules if not uid or r["user_id"] == uid]
+        if not targets:
+            return error_response("未找到该成员的锁定规则")
+        results = []
+        for rule in targets:
+            ok, message = await self.card_locker.enforce(
+                gid, rule, reason="webui-apply", nickname_hint=str(rule.get("note") or "")
+            )
+            results.append({"user_id": rule["user_id"], "ok": ok, "message": message})
+        succeeded = [r for r in results if r["ok"]]
+        return json_response({
+            "applied": len(succeeded),
+            "total": len(results),
+            "results": results,
+        })
+
+    async def web_card_lock_sync(self):
+        """POST /{base}/card-lock/sync：读取群成员名片，供前端按 QQ 号回填当前名片。"""
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象")
+        gid = str(payload.get("group_id") or "").strip()
+        query = str(payload.get("query") or "").strip()
+        if not gid:
+            return error_response("缺少 group_id 参数")
+        if not self._is_managed_group(gid):
+            return error_response("该群机器人非群主/管理员，无法读取成员名片")
+        bot = self._get_any_bot()
+        if bot is None:
+            return error_response("未找到可用的机器人连接，请先在任意群发送一条消息后重试")
+        try:
+            members = await bot.api.call_action(
+                "get_group_member_list", group_id=int(gid), no_cache=True
+            )
+        except Exception as e:
+            logger.error(f"[Guard] 群 {gid} 读取成员列表失败: {e}")
+            return error_response(f"读取成员列表失败：{e}")
+        out = []
+        if isinstance(members, (list, tuple)):
+            for m in members:
+                if not isinstance(m, dict):
+                    continue
+                uid = str(m.get("user_id") or "").strip()
+                if not uid:
+                    continue
+                # 支持按 QQ 号或昵称模糊过滤，避免大群一次返回上千条
+                if query and query not in uid and query not in str(m.get("nickname") or ""):
+                    continue
+                out.append({
+                    "user_id": uid,
+                    "nickname": str(m.get("nickname") or "").strip(),
+                    "card": str(m.get("card") or "").strip(),
+                })
+                if len(out) >= 200:
+                    break
+        return json_response({"members": out})
+
     def _purge_group_data(self, gid: str) -> None:
         """删除某群的全部本地数据：定时任务（含解除进行中禁言）、群配置、违规计数与日志。"""
         gid = str(gid)
@@ -655,6 +879,11 @@ class LLMGroupGuardPlugin(Star):
         self._join_oid.pop(gid, None)
         self._bot_roles.pop(gid, None)
         self._managed_warned.discard(gid)
+        # 名片锁定引擎状态：回声记录与轮询节流
+        locker = getattr(self, "card_locker", None)
+        if locker is not None:
+            locker.clear_group_state(gid)
+        self._card_lock_polled_at.pop(gid, None)
 
     # 权限开关每次实时读取该群配置，避免修改配置后需要重启插件才生效
     def _permission_verification(self, group_id) -> bool:
@@ -934,6 +1163,7 @@ class LLMGroupGuardPlugin(Star):
                 await self._refresh_bot_roles()
                 await self._check_schedules()
                 await self._check_high_recall()
+                await self._check_card_locks()
             except Exception as e:
                 logger.error(f"定时调度循环异常: {e}")
             await asyncio.sleep(CHECK_INTERVAL)
@@ -1117,6 +1347,82 @@ class LLMGroupGuardPlugin(Star):
                     await self._set_high_recall(str(gid), desired)
             except Exception as e:
                 logger.error(f"[Guard] 群 {gid} 高召回调度异常: {e}")
+
+    # ------------------------------------------------------------------
+    # 群名片锁定：原生 notice 事件驱动 + 定时轮询兜底
+    # ------------------------------------------------------------------
+    async def on_platform_loaded(self):
+        """在 aiocqhttp 上挂原生 notice 回调，捕获群名片变更事件。
+
+        AstrBot 的消息管线会把 notice 事件转成空消息（message_str=""）并在唤醒检查阶段丢弃，
+        因此 @filter.event_message_type 收不到群名片变更，必须走 aiocqhttp 原生回调。
+        """
+        try:
+            insts = self.context.platform_manager.get_insts()
+        except Exception as e:
+            logger.warning(f"[Guard] 枚举平台实例失败，名片锁定事件监听未启用: {e}")
+            return
+        for platform in insts:
+            try:
+                meta = platform.meta()
+                name = meta.name if hasattr(meta, "name") else str(meta)
+                if name != "aiocqhttp":
+                    continue
+                bot = getattr(platform, "bot", None)
+                if bot is None:
+                    continue
+                identity = id(bot)
+                if identity in self._notice_bots:
+                    continue
+                if not hasattr(bot, "on_notice"):
+                    logger.debug("[Guard] 当前 aiocqhttp 客户端无 on_notice，名片锁定仅轮询生效")
+                    continue
+
+                async def on_notice(event, current_bot=bot):
+                    await self._on_native_notice(current_bot, event)
+
+                bot.on_notice()(on_notice)
+                self._notice_bots.add(identity)
+                logger.info("[Guard] 已挂载群名片变更原生监听")
+            except Exception as e:
+                logger.warning(f"[Guard] 挂载群名片变更监听失败: {e}")
+
+    # 兼容兜底：旧版 AstrBot 若无 on_platform_loaded 钩子，该方法不生效，不影响其他功能
+    _on_platform_loaded_hook = getattr(filter, "on_platform_loaded", None)
+    if _on_platform_loaded_hook is not None:
+        on_platform_loaded = _on_platform_loaded_hook()(on_platform_loaded)
+
+    async def _on_native_notice(self, bot, event) -> None:
+        """处理原生 notice 事件：命中名片锁定规则时立即恢复。"""
+        try:
+            result = await self.card_locker.handle_card_notice(event)
+        except Exception as e:
+            logger.error(f"[Guard] 处理群名片变更事件异常: {e}")
+            return
+        if not result:
+            return
+        # 优先用事件所属的 bot 连接，避免群缓存过期时取到空客户端
+        if result.get("ok") and bot is not None:
+            logger.info(
+                f"[Guard] 群 {result['group_id']} 成员 {result['user_id']} 名片被改为"
+                f"「{result['new_card']}」，已锁定恢复"
+            )
+
+    async def _check_card_locks(self):
+        """轮询兜底：按各群配置的间隔比对成员名片与锁定值，偏离则恢复。"""
+        now = time.time()
+        for gid in sorted(self.card_locker.locked_groups()):
+            try:
+                gconf = self._gconf(gid)
+                if not gconf.get("card_lock_poll_enable"):
+                    continue
+                interval = max(60, int(gconf.get("card_lock_poll_interval") or 300))
+                if now - float(self._card_lock_polled_at.get(gid, 0)) < interval:
+                    continue  # 该群未到轮询时间
+                self._card_lock_polled_at[gid] = now
+                await self.card_locker.poll_group(gid)
+            except Exception as e:
+                logger.error(f"[Guard] 群 {gid} 名片锁定轮询异常: {e}")
 
     # ------------------------------------------------------------------
     # 自动审批入群：LLM 检测申请信息是否含昵称与 OID，通过则同意并自动改名片
