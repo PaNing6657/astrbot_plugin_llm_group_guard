@@ -343,20 +343,22 @@ def test_notify() -> None:
         check("通知含锁定名片", "管理员" in text, str(text))
 
     # 通知关闭 → 不发
-    engine2, bot2, _, _, _ = make_engine(rules=rules, bot=bot2, notify=False)
+    botA = FakeBot()
+    engine2, botA, _, _, _ = make_engine(rules=rules, bot=botA, notify=False)
     asyncio.run(engine2.handle_card_notice({
         "post_type": "notice", "notice_type": "group_card",
         "group_id": 100, "user_id": 12345, "card_old": "管理员", "card_new": "X",
     }))
-    check("通知关闭不发送", len(bot2.sent) == 0)
+    check("通知关闭不发送", len(botA.sent) == 0)
 
     # 模板为空 → 不发
-    engine3, bot3, _, _, _ = make_engine(rules=rules, bot=bot3, notify_msg="   ")
+    botB = FakeBot()
+    engine3, botB, _, _, _ = make_engine(rules=rules, bot=botB, notify_msg="   ")
     asyncio.run(engine3.handle_card_notice({
         "post_type": "notice", "notice_type": "group_card",
         "group_id": 100, "user_id": 12345, "card_old": "管理员", "card_new": "X",
     }))
-    check("空模板不发送", len(bot3.sent) == 0)
+    check("空模板不发送", len(botB.sent) == 0)
 
     # 自定义 notifier 生效且通知失败不影响锁定
     got: list[tuple[str, str]] = []
@@ -412,8 +414,8 @@ def install_plugin_stubs(data_dir: str):
         def __init__(self, context):
             self.context = context
 
-    def _register(*args):
-        """兼容 @register(...) 与 @filter.xxx 两种装饰器用法。"""
+    def _register(*args, **kwargs):
+        """兼容 @register(...) / @filter.llm_tool(name=...) 等关键字参数装饰器用法。"""
         if len(args) == 1 and callable(args[0]) and not isinstance(args[0], str):
             return args[0]
 
@@ -514,8 +516,16 @@ def test_plugin_integration() -> None:
     print("[7] 插件实例级集成")
     tmp = tempfile.mkdtemp(prefix="cardlock_")
     ctx, api_calls = install_plugin_stubs(tmp)
+    # main.py 使用相对导入（from .core...），必须按包方式导入才能解析
+    pkg_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    pkg_name = os.path.basename(pkg_root)
+    parent = os.path.dirname(pkg_root)
+    if pkg_name not in sys.path:
+        sys.path.insert(0, parent)
     try:
-        import main as plugin_main
+        import importlib
+
+        plugin_main = importlib.import_module(f"{pkg_name}.main")
     except Exception as e:
         check("插件可导入", False, repr(e))
         return
@@ -558,6 +568,7 @@ def test_plugin_integration() -> None:
     # 保存 dict 列表形态后重新加载仍是结构化数据（不被压成字符串）
     groups = plugin.config.setdefault("groups", {})
     groups["200"] = dict(plugin_main.DEFAULT_GROUP_CONFIG)
+    groups["200"]["card_lock_enable"] = True
     groups["200"]["card_lock_list"] = [
         {"user_id": "12345", "card": "管理员", "note": "核心"},
         json.dumps({"user_id": "67890", "card": "客服"}, ensure_ascii=False),

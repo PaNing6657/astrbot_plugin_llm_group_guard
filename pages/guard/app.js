@@ -142,6 +142,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
     if (btn.dataset.tab === "join") loadJoin();
     if (btn.dataset.tab === "hr") loadHighRecall();
     if (btn.dataset.tab === "data") loadLocalData();
+    if (btn.dataset.tab === "cardlock") loadCardLock();
   });
 });
 
@@ -284,6 +285,7 @@ async function selectGroup(gid, name, managed) {
   loadViolations();
   loadJoin();
   loadHighRecall();
+  loadCardLock();
 }
 
 $("switchGroup").addEventListener("click", () => openGroupPicker(false));
@@ -763,6 +765,206 @@ async function setHrManual(active) {
 
 $("hrManualOn").addEventListener("click", () => setHrManual(true));
 $("hrManualOff").addEventListener("click", () => setHrManual(false));
+
+/* ---------- 群名片锁定（按当前群） ---------- */
+let cardLockRules = [];      // 规则列表 [{user_id, card, note}]
+let cardLockCurrent = {};    // {user_id: {card, nickname}} 已锁定成员的当前名片
+let cardLockMembers = [];    // 从群成员列表选出的候选
+let cardLockArmed = null;    // 待二次确认删除的 QQ 号
+
+function renderCardLock(data) {
+  cardLockRules = (data && data.rules) || [];
+  cardLockCurrent = (data && data.current) || {};
+  bindToggle($("cardLockEnable"), data && data.enable);
+  bindToggle($("cardLockPollToggle"), data && data.poll_enable);
+  bindToggle($("cardLockNotifyToggle"), data && data.notify !== false);
+  $("cardLockPollInterval").value = (data && data.poll_interval) || 300;
+  $("cardLockNotifyMsg").value = (data && data.notify_msg) || "";
+  $("cardLockSummary").textContent = `共 ${cardLockRules.length} 条`;
+  $("cardLockEmpty").classList.toggle("hidden", cardLockRules.length > 0);
+
+  const tbody = $("cardLockBody");
+  tbody.innerHTML = "";
+  cardLockRules.forEach((r) => {
+    const info = cardLockCurrent[r.user_id];
+    const cur = info ? info.card : "";
+    // 未取到当前名片（成员已退群/无权限）与已偏离要区分显示
+    let state;
+    if (!currentGroupManaged) state = '<span class="badge warn">需管理员权限</span>';
+    else if (!info) state = '<span class="badge">未获取</span>';
+    else if (cur === r.card) state = '<span class="badge green">正常</span>';
+    else state = '<span class="badge red">已偏离</span>';
+
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${escapeHtml(r.user_id)}${info && info.nickname ? `<div class="hint" style="margin:2px 0 0">${escapeHtml(info.nickname)}</div>` : ""}</td>` +
+      `<td>${escapeHtml(r.card)}</td>` +
+      `<td>${escapeHtml(cur) || '<span class="hint">（空）</span>'}</td>` +
+      `<td>${state}</td>` +
+      `<td>${escapeHtml(r.note || "")}</td>` +
+      `<td><button class="btn ghost sm" data-act="apply" data-u="${escapeHtml(r.user_id)}">立即恢复</button>` +
+      ` <button class="btn ghost sm danger" data-act="del" data-u="${escapeHtml(r.user_id)}">解除</button></td>`;
+
+    tr.querySelector('[data-act="apply"]').addEventListener("click", () => applyCardLock(r.user_id));
+    tr.querySelector('[data-act="del"]').addEventListener("click", (e) => deleteCardLock(r.user_id, e.currentTarget));
+    tbody.appendChild(tr);
+  });
+  lockControls($("page-cardlock"), !currentGroupManaged); // 非管理群：设置只读
+  bindTableOverflow();
+}
+
+async function loadCardLock() {
+  if (!currentGroup) return;
+  try {
+    renderCardLock(await api("card-lock/list", "GET", { group_id: currentGroup }));
+  } catch (e) {
+    toast("cardLockToast", "加载失败：" + e, true);
+  }
+}
+
+$("saveCardLockCfg").addEventListener("click", async () => {
+  if (managedBlocked("cardLockCfgToast", "该群机器人非群主/管理员，无法使用名片锁定")) return;
+  const payload = {
+    card_lock_enable: $("cardLockEnable").classList.contains("on"),
+    card_lock_poll_enable: $("cardLockPollToggle").classList.contains("on"),
+    card_lock_notify: $("cardLockNotifyToggle").classList.contains("on"),
+    card_lock_poll_interval: Number($("cardLockPollInterval").value) || 300,
+    card_lock_notify_msg: $("cardLockNotifyMsg").value,
+  };
+  try {
+    await api("config/save", "POST", { group_id: currentGroup, group: payload });
+    toast("cardLockCfgToast", "已保存");
+    loadCardLock();
+  } catch (e) {
+    toast("cardLockCfgToast", "保存失败：" + e, true);
+  }
+});
+
+$("cardLockAdd").addEventListener("click", async () => {
+  if (managedBlocked("cardLockToast", "该群机器人非群主/管理员，无法使用名片锁定")) return;
+  const userId = $("cardLockUserId").value.trim();
+  const card = $("cardLockCard").value.trim();
+  if (!userId) return toast("cardLockToast", "请填写 QQ 号", true);
+  if (!card) return toast("cardLockToast", "请填写锁定名片", true);
+  try {
+    const res = await api("card-lock/set", "POST", {
+      group_id: currentGroup,
+      user_id: userId,
+      card: card,
+      note: $("cardLockNote").value.trim(),
+      apply_now: $("cardLockApplyNow").checked,
+    });
+    toast("cardLockToast", res.applied ? "规则已保存并立即生效" : "规则已保存");
+    $("cardLockUserId").value = "";
+    $("cardLockCard").value = "";
+    $("cardLockNote").value = "";
+    $("cardLockApplyNow").checked = false;
+    cardLockMembers = [];
+    loadCardLock();
+  } catch (e) {
+    toast("cardLockToast", "保存失败：" + e, true);
+  }
+});
+
+async function applyCardLock(userId) {
+  if (managedBlocked("cardLockToast", "该群机器人非群主/管理员，无法使用名片锁定")) return;
+  try {
+    const res = await api("card-lock/apply", "POST", { group_id: currentGroup, user_id: userId });
+    toast("cardLockToast", res.applied > 0 ? `已恢复 ${res.applied} 名成员的名片` : "恢复失败");
+    loadCardLock();
+  } catch (e) {
+    toast("cardLockToast", "执行失败：" + e, true);
+  }
+}
+
+$("applyAllCardLock").addEventListener("click", async () => {
+  if (managedBlocked("cardLockCfgToast", "该群机器人非群主/管理员，无法使用名片锁定")) return;
+  try {
+    const res = await api("card-lock/apply", "POST", { group_id: currentGroup });
+    const failed = (res.results || []).filter((r) => !r.ok);
+    if (failed.length) {
+      toast("cardLockCfgToast", `成功 ${res.applied}/${res.total}，失败：${failed.map((f) => f.user_id).join("、")}`, true);
+    } else {
+      toast("cardLockCfgToast", `已恢复全部 ${res.applied} 名成员的名片`);
+    }
+    loadCardLock();
+  } catch (e) {
+    toast("cardLockCfgToast", "执行失败：" + e, true);
+  }
+});
+
+// 沙箱 iframe 禁用 confirm，删除采用二次点击确认
+function deleteCardLock(userId, btn) {
+  if (managedBlocked("cardLockToast", "该群机器人非群主/管理员，无法使用名片锁定")) return;
+  if (cardLockArmed !== userId) {
+    cardLockArmed = userId;
+    btn.textContent = "再点一次确认";
+    btn.classList.add("primary");
+    setTimeout(() => {
+      cardLockArmed = null;
+      btn.textContent = "解除";
+      btn.classList.remove("primary");
+    }, 3000);
+    return;
+  }
+  cardLockArmed = null;
+  clearTimeout(btn._reset);
+  try {
+    api("card-lock/delete", "POST", { group_id: currentGroup, user_id: userId })
+      .then(() => {
+        toast("cardLockToast", "已解除该成员的名片锁定");
+        loadCardLock();
+      })
+      .catch((e) => toast("cardLockToast", "解除失败：" + e, true));
+  } catch (e) {
+    toast("cardLockToast", "解除失败：" + e, true);
+  }
+}
+
+// 从群成员中选择：读取成员名片后按 QQ 号 / 昵称过滤，最多返回 200 条
+$("cardLockPickMember").addEventListener("click", async () => {
+  if (managedBlocked("cardLockToast", "该群机器人非群主/管理员，无法读取成员名片")) return;
+  const query = $("cardLockUserId").value.trim();
+  toast("cardLockToast", "正在读取群成员…");
+  try {
+    const res = await api("card-lock/sync", "POST", { group_id: currentGroup, query: query });
+    cardLockMembers = res.members || [];
+    if (!cardLockMembers.length) {
+      cardLockMembers = [];
+      return toast("cardLockToast", query ? "未找到匹配的群成员" : "未读取到群成员", true);
+    }
+    // 首个成员直接回填，其余逐条列出供选择
+    const first = cardLockMembers[0];
+    $("cardLockUserId").value = first.user_id;
+    if (!$("cardLockCard").value.trim()) $("cardLockCard").value = first.card || first.nickname || "";
+    const extra = cardLockMembers.length - 1;
+    toast("cardLockToast", extra > 0 ? `已匹配 ${cardLockMembers.length} 人，已填入首个；可改 QQ 号后再次点击` : "已填入该成员信息");
+  } catch (e) {
+    cardLockMembers = [];
+    toast("cardLockToast", "读取失败：" + e, true);
+  }
+});
+
+// 用该成员当前群名片填充锁定值（需先填 QQ 号）
+$("cardLockFillCurrent").addEventListener("click", async () => {
+  if (managedBlocked("cardLockToast", "该群机器人非群主/管理员，无法读取成员名片")) return;
+  const userId = $("cardLockUserId").value.trim();
+  if (!userId) return toast("cardLockToast", "请先填写 QQ 号", true);
+  const known = cardLockCurrent[userId];
+  if (known) {
+    $("cardLockCard").value = known.card || known.nickname || "";
+    return toast("cardLockToast", "已填入其当前名片");
+  }
+  try {
+    const res = await api("card-lock/sync", "POST", { group_id: currentGroup, query: userId });
+    const hit = (res.members || []).find((m) => m.user_id === userId);
+    if (!hit) return toast("cardLockToast", "未在群成员中找到该 QQ 号", true);
+    $("cardLockCard").value = hit.card || hit.nickname || "";
+    toast("cardLockToast", "已填入其当前名片");
+  } catch (e) {
+    toast("cardLockToast", "读取失败：" + e, true);
+  }
+});
 
 /* ---------- 初始化 ---------- */
 (async function init() {

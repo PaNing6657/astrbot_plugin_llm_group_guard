@@ -33,6 +33,7 @@
     <button class="tab" data-tab="schedules">定时禁言</button>
     <button class="tab" data-tab="join">入群审批</button>
     <button class="tab" data-tab="data">数据管理</button>
+    <button class="tab" data-tab="cardlock">群名片锁定</button>
   </nav>
 
   <main>
@@ -302,6 +303,99 @@
           <div class="empty" id="localDataEmpty">暂无本地持久化数据</div>
         </div>
         <div class="actions"><span class="toast" id="dataToast"></span></div>
+      </div>
+    </section>
+    <!-- 群名片锁定 -->
+    <section class="page" id="page-cardlock">
+      <div class="page-head">
+        <h2>群名片锁定</h2>
+        <span class="page-note">把指定成员的群名片固定为指定值，被改动后自动改回（需机器人为群主/管理员）</span>
+      </div>
+
+      <div class="card">
+        <div class="toggle-row" style="margin-bottom: 14px;">
+          <div>
+            <div class="t-label">启用群名片锁定</div>
+            <div class="t-hint">关闭后下方规则全部失效，机器人不再自动改回被改动的群名片</div>
+          </div>
+          <div class="toggle" id="cardLockEnable" data-key="card_lock_enable"></div>
+        </div>
+
+        <div class="toggle-row" style="margin-bottom: 14px;">
+          <div>
+            <div class="t-label">定时轮询兜底</div>
+            <div class="t-hint">部分平台不推送名片变更事件，或后台批量改名片时事件会丢失；开启后按间隔主动比对并恢复</div>
+          </div>
+          <div class="toggle" id="cardLockPollToggle" data-key="card_lock_poll_enable"></div>
+        </div>
+
+        <div class="field" style="margin-top: 4px;">
+          <label>轮询间隔（秒）</label>
+          <input type="number" id="cardLockPollInterval" data-key="card_lock_poll_interval" min="60" step="30">
+          <p class="hint">按群独立计时，最小 60 秒；群多或成员多时建议 300 秒以上，避免频繁拉取成员列表</p>
+        </div>
+
+        <div class="toggle-row" style="margin: 16px 0 14px;">
+          <div>
+            <div class="t-label">恢复后在群内提示</div>
+            <div class="t-hint">名片被改回锁定值时向群里发一条提示，避免成员不知情反复改动</div>
+          </div>
+          <div class="toggle" id="cardLockNotifyToggle" data-key="card_lock_notify"></div>
+        </div>
+
+        <div class="field">
+          <label>恢复提示语</label>
+          <textarea id="cardLockNotifyMsg" data-key="card_lock_notify_msg" placeholder="例如：🔒 {at_user} 的群名片已被锁定，已恢复为「{card}」"></textarea>
+          <p class="hint">支持 {at_user}(@该成员) {nickname} {user_id} {card}(锁定后的名片) {old_card}(被改动前的锁定值)，留空不发送</p>
+        </div>
+
+        <div class="actions">
+          <button class="btn primary" id="saveCardLockCfg">保存本页设置</button>
+          <button class="btn ghost" id="applyAllCardLock">立即执行全部锁定</button>
+          <span class="toast" id="cardLockCfgToast"></span>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="page-head" style="margin-bottom:12px">
+          <h3 style="font-size:15px">锁定规则</h3>
+          <span class="page-note" id="cardLockSummary">共 0 条</span>
+        </div>
+
+        <div class="form-grid" style="margin-bottom: 14px;">
+          <div class="field">
+            <label>QQ 号</label>
+            <input type="text" id="cardLockUserId" placeholder="要锁定名片的 QQ 号">
+          </div>
+          <div class="field">
+            <label>锁定名片</label>
+            <input type="text" id="cardLockCard" placeholder="例如：管理员">
+          </div>
+          <div class="field">
+            <label>备注（仅本页面可见）</label>
+            <input type="text" id="cardLockNote" placeholder="例如：核心群管">
+          </div>
+        </div>
+
+        <div class="actions" style="margin-bottom: 14px;">
+          <button class="btn ghost sm" id="cardLockPickMember">从群成员中选择</button>
+          <button class="btn ghost sm" id="cardLockFillCurrent">用其当前名片填充</button>
+          <button class="btn primary" id="cardLockAdd">添加 / 覆盖规则</button>
+          <span class="toast" id="cardLockToast"></span>
+        </div>
+        <p class="hint" style="margin: -6px 0 14px;">
+          <label><input type="checkbox" id="cardLockApplyNow"> 添加后立即生效（当场把该成员名片改为锁定值）</label>
+        </p>
+
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>QQ 号</th><th>锁定名片</th><th>当前名片</th><th>状态</th><th>备注</th><th>操作</th></tr>
+            </thead>
+            <tbody id="cardLockBody"></tbody>
+          </table>
+          <div class="empty" id="cardLockEmpty">尚未配置名片锁定规则</div>
+        </div>
       </div>
     </section>
   </main>
