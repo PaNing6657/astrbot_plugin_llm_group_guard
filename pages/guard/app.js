@@ -154,6 +154,7 @@ function localTypeBadges(types) {
     violations: '<span class="badge red">违规计数</span>',
     log: '<span class="badge green">违规日志</span>',
     leave: '<span class="badge warn">退群记录</span>',
+    join: '<span class="badge blue">进群记录</span>',
   };
   return types.map((t) => map[t] || t).join(" ");
 }
@@ -652,14 +653,10 @@ async function loadJoin() {
   bindToggle($("joinVerifyToggle"), g.join_verify_enable);
   bindToggle($("joinAutoRejectToggle"), g.join_auto_reject_enable !== false);
   bindToggle($("joinCardNotifyToggle"), g.join_card_notify);
-  bindToggle($("joinLevelLimitToggle"), g.join_level_limit_enable);
   fillModelSelect($("joinLlmChat"), g.join_llm_chat || "", "（沿用群消息审核模型）");
   fillModelSelect($("joinLlmFallback"), g.join_llm_chat_fallback || "", "（沿用消息审核备用模型）");
   fillModelSelect($("joinLlmOcr"), g.join_llm_ocr_chat || "", "（沿用消息审核识图模型）");
   $("joinPrompt").value = g.join_prompt || "";
-  $("joinLevelLimitMin").value = g.join_level_limit_min ?? 16;
-  $("joinLevelLimitUnknown").value = g.join_level_limit_unknown || "allow";
-  $("joinLevelLimitReason").value = g.join_level_limit_reason || "";
   bindToggle($("joinRejoinBlockToggle"), g.join_rejoin_block_enable);
   const rejoinWindow = splitDurationSeconds(g.join_rejoin_block_seconds ?? 3600);
   $("joinRejoinBlockValue").value = rejoinWindow.value;
@@ -673,6 +670,7 @@ async function loadJoin() {
   $("joinCardNotifyFailMsg").value = g.join_card_notify_fail_msg || "";
   lockControls($("page-join"), !currentGroupManaged); // 非管理群：审批设置只读
   loadRejoinRecords(); // 退群记录：数据查看与清理不依赖群管理权限
+  loadJoinRecords(); // 进群记录：数据查看与清理不依赖群管理权限
 }
 $("saveJoin").addEventListener("click", async () => {
   const payload = {
@@ -681,10 +679,6 @@ $("saveJoin").addEventListener("click", async () => {
     join_llm_chat_fallback: $("joinLlmFallback").value,
     join_llm_ocr_chat: $("joinLlmOcr").value,
     join_prompt: $("joinPrompt").value,
-    join_level_limit_enable: $("joinLevelLimitToggle").classList.contains("on"),
-    join_level_limit_min: Number($("joinLevelLimitMin").value || 0),
-    join_level_limit_unknown: $("joinLevelLimitUnknown").value,
-    join_level_limit_reason: $("joinLevelLimitReason").value,
     join_rejoin_block_enable: $("joinRejoinBlockToggle").classList.contains("on"),
     join_rejoin_block_seconds:
       Number($("joinRejoinBlockValue").value || 0) * Number($("joinRejoinBlockUnit").value || 1),
@@ -812,6 +806,64 @@ $("rejoinRecordsClear").addEventListener("click", (e) => {
       loadRejoinRecords();
     })
     .catch((e) => toast("rejoinToast", "清空失败：" + e, true));
+});
+
+/* ---------- 进群记录（同意 / 拒绝操作，按当前群） ---------- */
+const JOIN_ACTION_LABELS = { approve: "同意", reject: "拒绝" };
+const JOIN_SOURCE_LABELS = { llm: "LLM 审核", rejoin_block: "退群拦截" };
+
+async function loadJoinRecords() {
+  if (!currentGroup) return;
+  let data;
+  try {
+    data = await api("join-records", "GET", { group_id: currentGroup });
+  } catch (e) {
+    toast("joinRecordToast", "进群记录加载失败：" + e, true);
+    return;
+  }
+  const rows = data.records || [];
+  $("joinRecordEmpty").classList.toggle("hidden", rows.length > 0);
+  const tbody = $("joinRecordBody");
+  tbody.innerHTML = "";
+  rows.forEach((r) => {
+    const label = JOIN_ACTION_LABELS[r.action] || r.action || "-";
+    const badge = r.action === "approve" ? "green" : "red";
+    const failed = r.ok === false ? ' <span class="badge warn">失败</span>' : "";
+    const source = JOIN_SOURCE_LABELS[r.source] || r.source || "-";
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${escapeHtml(formatDateTime(r.ts))}</td>` +
+      `<td>${escapeHtml(r.user_id)}</td>` +
+      `<td>${escapeHtml(r.nickname || "-")}</td>` +
+      `<td><span class="badge ${badge}">${escapeHtml(label)}</span>${failed}</td>` +
+      `<td>${escapeHtml(source)}</td>` +
+      `<td>${escapeHtml(r.reason || "-")}</td>` +
+      `<td>${escapeHtml(r.comment || "-")}</td>`;
+    tbody.appendChild(tr);
+  });
+  bindTableOverflow();
+}
+
+$("joinRecordsRefresh").addEventListener("click", () => loadJoinRecords());
+$("joinRecordsClear").addEventListener("click", (e) => {
+  const btn = e.currentTarget;
+  if (!btn._armed) {
+    btn._armed = true;
+    btn.textContent = "再点一次确认清空";
+    setTimeout(() => {
+      btn._armed = false;
+      btn.textContent = "清空本群进群记录";
+    }, 3000);
+    return;
+  }
+  btn._armed = false;
+  btn.textContent = "清空本群进群记录";
+  api("join-records/clear", "POST", { group_id: currentGroup })
+    .then(() => {
+      toast("joinRecordToast", "已清空本群进群记录");
+      loadJoinRecords();
+    })
+    .catch((e) => toast("joinRecordToast", "清空失败：" + e, true));
 });
 
 /* ---------- 高召回模式（按当前群） ---------- */

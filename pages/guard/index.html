@@ -195,7 +195,7 @@
     <section class="page" id="page-join">
       <div class="page-head">
         <h2>入群审批</h2>
-        <span class="page-note">审核 LLM 独立选择 + QQ 等级限制 + 退群拦截与记录 + 自定义审核要求 + 自动拒绝说明 + 进群欢迎 / 改名提示</span>
+        <span class="page-note">审核 LLM 独立选择 + 退群拦截与记录 + 自定义审核要求 + 自动拒绝说明 + 进群欢迎 / 改名提示</span>
       </div>
       <div class="card">
         <div class="toggle-row" style="margin-bottom: 14px;">
@@ -228,36 +228,6 @@
           <label>入群审核要求（自定义）</label>
           <textarea id="joinPrompt" placeholder="留空=使用内置默认要求：申请信息必须同时包含【昵称】和【OID】（纯数字编号）"></textarea>
           <p class="hint">完全自定义本次入群审批的判定要求（无内置话术），例如：必须包含真实姓名与学号，且备注中不得含广告或二维码；留空则使用内置默认要求（昵称+OID）。填写后判定完全由模型按你的要求给出，不再强制要求昵称与 OID</p>
-        </div>
-
-        <div class="toggle-row" style="margin: 16px 0 14px;">
-          <div>
-            <div class="t-label">QQ 等级限制</div>
-            <div class="t-hint">开启后先查询申请人的 QQ 等级：低于设定等级直接按「等级不足」处理，不再调用 LLM 审核</div>
-          </div>
-          <div class="toggle" id="joinLevelLimitToggle" data-key="join_level_limit_enable"></div>
-        </div>
-
-        <div class="form-grid">
-          <div class="field">
-            <label>最低 QQ 等级</label>
-            <input type="number" id="joinLevelLimitMin" min="0" max="4096" step="1" placeholder="如 16（一个太阳=16，皇冠=64）">
-            <p class="hint">0 = 不限制（等同关闭）；星星=1、月亮=4、太阳=16、皇冠=64、企鹅=256（等级可超过 255）</p>
-          </div>
-          <div class="field">
-            <label>无法获取等级时</label>
-            <select id="joinLevelLimitUnknown">
-              <option value="allow">继续正常审核（默认）</option>
-              <option value="reject">按不满足等级限制拒绝</option>
-              <option value="skip">跳过自动审批，留给管理员</option>
-            </select>
-            <p class="hint">平台未返回有效等级（字段缺失、为 0 或账号隐藏等级）时按此策略处理；入群申请优先强制刷新陌生人资料（no_cache）读取，已在本群的重复申请才会回退群成员资料；兼容 NapCat（qqLevel / qq_level）等实现</p>
-          </div>
-          <div class="field full">
-            <label>等级不足拒绝理由</label>
-            <textarea id="joinLevelLimitReason" placeholder="你的QQ等级不足（当前 {level} 级，要求 {min_level} 级及以上）"></textarea>
-            <p class="hint">作为不通过原因填入拒绝回执与群内提示，支持 {level}(当前等级，未知时为「未知」) {min_level}(要求等级) {user_id} {nickname}</p>
-          </div>
         </div>
 
         <div class="toggle-row" style="margin: 16px 0 14px;">
@@ -310,6 +280,22 @@
             <tbody id="rejoinBody"></tbody>
           </table>
           <div class="empty" id="rejoinEmpty">暂无退群记录（开启后自动记录）</div>
+        </div>
+
+        <div class="t-label" style="margin: 18px 0 8px;">进群记录（同意 / 拒绝）</div>
+        <div class="actions" style="margin: 0 0 6px;">
+          <button class="btn ghost sm" id="joinRecordsRefresh" data-allow-unmanaged="1">刷新进群记录</button>
+          <button class="btn ghost sm danger" id="joinRecordsClear" data-allow-unmanaged="1">清空本群进群记录</button>
+          <span class="toast" id="joinRecordToast"></span>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>时间</th><th>QQ 号</th><th>昵称</th><th>操作</th><th>来源</th><th>原因</th><th>申请信息</th></tr>
+            </thead>
+            <tbody id="joinRecordBody"></tbody>
+          </table>
+          <div class="empty" id="joinRecordEmpty">暂无进群操作记录（开启自动审批后自动记录）</div>
         </div>
 
         <div class="toggle-row" style="margin: 16px 0 14px;">
@@ -374,7 +360,7 @@
         </div>
       </div>
       <div class="card">
-        <div class="page-note" style="margin-bottom:12px">本地持久化数据概览：删除已解散群或残留的配置 / 定时任务 / 违规记录 / 退群记录（含进行中的定时禁言会先解除）</div>
+        <div class="page-note" style="margin-bottom:12px">本地持久化数据概览：删除已解散群或残留的配置 / 定时任务 / 违规记录 / 退群记录 / 进群记录（含进行中的定时禁言会先解除）</div>
         <div class="table-wrap">
           <table class="data-table">
             <thead>
@@ -508,6 +494,6 @@
 </div>
 
 <!-- module 脚本延迟执行，确保在 AstrBot 注入的 bridge SDK 之后运行 -->
-<script type="module" src="app.js?v=1.5.2"></script>
+<script type="module" src="app.js?v=1.7.0"></script>
 </body>
 </html>

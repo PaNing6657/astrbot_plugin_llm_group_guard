@@ -25,6 +25,7 @@ from .core.high_recall import (
     high_recall_next_flip,
     validate_high_recall_times,
 )
+from .core.join_tracker import JoinTracker
 from .core.leave_tracker import LeaveTracker
 from .core.permission_utils import check_group_and_permission
 from .core.whole_ban_scheduler import (
@@ -41,7 +42,6 @@ PLUGIN_NAME = "astrbot_plugin_llm_group_guard"
 CHECK_INTERVAL = 20  # 定时禁言调度循环检查间隔（秒）
 BOT_ROLE_REFRESH_INTERVAL = 60  # 机器人群内身份探测间隔（秒）
 MANAGED_ROLES = ("owner", "admin")  # 具备群管理能力的身份
-MAX_QQ_LEVEL = 4096  # QQ 等级上限（现代等级含「企鹅」=256 级/个，留足余量）
 
 # 已移除 _conf_schema.json（不提供 AstrBot 自带设置页），
 # 配置默认值内聚于此，全部由插件 WebUI 页面管理。
@@ -92,11 +92,6 @@ DEFAULT_GROUP_CONFIG = {
     "join_llm_ocr_chat": "",  # 入群审批专用识图模型（审核信息含图片时使用）
     # 入群审批要求完全自定义：留空仅用内置默认要求（需同时含昵称与 OID）
     "join_prompt": "",
-    # QQ 等级限制：开启后先查申请人 QQ 等级，低于下限直接按等级不足处理（不再调用 LLM 审核）
-    "join_level_limit_enable": False,
-    "join_level_limit_min": 16,  # 最低 QQ 等级（星星=1，月亮=4，太阳=16，皇冠=64；0=不限制）
-    "join_level_limit_unknown": "allow",  # 无法获取等级时：allow=继续正常审核 / reject=按等级不足拒绝 / skip=跳过自动审批
-    "join_level_limit_reason": "你的QQ等级不足（当前 {level} 级，要求 {min_level} 级及以上）",
     # 退群记录：退群后 X 时间内再次申请直接拒绝（防退群后立刻重进）
     "join_rejoin_block_enable": False,
     "join_rejoin_block_seconds": 3600,  # 拦截窗口（秒）：退群后该时长内的入群申请直接拒绝
@@ -249,7 +244,7 @@ def _to_weekly_rule(start_ts: float, end_ts: float) -> dict:
     }
 
 
-@register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核与群名片锁定", "v1.5.2")
+@register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核与群名片锁定", "v1.7.0")
 class LLMGroupGuardPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -274,6 +269,8 @@ class LLMGroupGuardPlugin(Star):
         self.guard = MessageGuard(config, self.reviewer, data_dir=str(self.data_dir), gconf_provider=self._gconf)
         # 退群记录：成员退群时间（供「退群后 X 时间内再次申请自动拒绝」使用）
         self.leave_tracker = LeaveTracker(self.data_dir, logger)
+        # 进群记录：每一次自动同意/拒绝入群操作（供 WebUI「进群记录」列表展示）
+        self.join_tracker = JoinTracker(self.data_dir, logger)
         # 群内最近一次缓存的 bot 客户端，供定时任务在无事件上下文时使用
         self._group_runtime: dict[str, dict] = {}
         # 审批通过者的 OID 缓存 {gid: {uid: oid}}，供成员进群事件发送欢迎时使用
@@ -329,6 +326,8 @@ class LLMGroupGuardPlugin(Star):
         self.context.register_web_api(f"{base}/rejoin-records", self.web_rejoin_records, ["GET"], "退群记录列表")
         self.context.register_web_api(f"{base}/rejoin-records/delete", self.web_rejoin_record_delete, ["POST"], "删除单条退群记录")
         self.context.register_web_api(f"{base}/rejoin-records/clear", self.web_rejoin_record_clear, ["POST"], "清空某群退群记录")
+        self.context.register_web_api(f"{base}/join-records", self.web_join_records, ["GET"], "进群同意/拒绝操作记录")
+        self.context.register_web_api(f"{base}/join-records/clear", self.web_join_record_clear, ["POST"], "清空某群进群记录")
 
     async def web_get_config(self):
         # GET /config?group_id=X：返回全局配置 + 该群配置
@@ -362,9 +361,6 @@ class LLMGroupGuardPlugin(Star):
                 if error:
                     return error_response(error)
                 error = self._validate_merge(merged)
-                if error:
-                    return error_response(error)
-                error = self._validate_join_level(merged)
                 if error:
                     return error_response(error)
                 error = self._validate_rejoin_block(merged)
@@ -664,7 +660,7 @@ class LLMGroupGuardPlugin(Star):
         ]
 
     def _local_data_index(self) -> dict:
-        """汇总本地各群数据概览：{gid: {config, schedule, violations, log, leave}}。"""
+        """汇总本地各群数据概览：{gid: {config, schedule, violations, log, leave, join}}。"""
         index: dict[str, dict] = {}
         for gid in (self.config.get("groups") or {}):
             index.setdefault(str(gid), {}).setdefault("config", True)
@@ -682,6 +678,8 @@ class LLMGroupGuardPlugin(Star):
                 index.setdefault(gid, {}).setdefault("log", True)
         for gid in self.leave_tracker.records:
             index.setdefault(str(gid), {}).setdefault("leave", True)
+        for gid in self.join_tracker.records:
+            index.setdefault(str(gid), {}).setdefault("join", True)
         return index
 
     async def web_local_data(self):
@@ -768,6 +766,28 @@ class LLMGroupGuardPlugin(Star):
             return error_response("缺少 group_id")
         cleared = self.leave_tracker.clear(gid)
         logger.info(f"[Guard] 已清空群 {gid} 的退群记录（{cleared}）")
+        return json_response({"cleared": cleared})
+
+    # ------------------------------------------------------------------
+    # WebUI：进群记录（同意 / 拒绝操作）
+    # ------------------------------------------------------------------
+    async def web_join_records(self):
+        """GET /{base}/join-records?group_id=X：返回该群进群同意/拒绝操作记录（新→旧）。"""
+        gid = str(request.query.get("group_id") or "").strip()
+        if not gid:
+            return error_response("缺少 group_id 参数")
+        return json_response({"records": self.join_tracker.group_records(gid, limit=200)})
+
+    async def web_join_record_clear(self):
+        """POST /{base}/join-records/clear：清空某群进群记录。"""
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象")
+        gid = str(payload.get("group_id") or "").strip()
+        if not gid:
+            return error_response("缺少 group_id")
+        cleared = self.join_tracker.clear(gid)
+        logger.info(f"[Guard] 已清空群 {gid} 的进群记录（{cleared}）")
         return json_response({"cleared": cleared})
 
     # ------------------------------------------------------------------
@@ -987,7 +1007,10 @@ class LLMGroupGuardPlugin(Star):
         # 4. 退群记录
         if gid in self.leave_tracker.records:
             self.leave_tracker.clear(gid)
-        # 5. 清理运行态缓存
+        # 5. 进群记录
+        if gid in self.join_tracker.records:
+            self.join_tracker.clear(gid)
+        # 6. 清理运行态缓存
         self._group_runtime.pop(gid, None)
         self._join_oid.pop(gid, None)
         self._bot_roles.pop(gid, None)
@@ -1386,23 +1409,6 @@ class LLMGroupGuardPlugin(Star):
         return None
 
     @staticmethod
-    def _validate_join_level(gconf: dict) -> Optional[str]:
-        """校验入群审批 QQ 等级限制：未开启或最低等级为 0-256 的整数时返回 None。"""
-        if not gconf.get("join_level_limit_enable"):
-            return None
-        value = gconf.get("join_level_limit_min")
-        raw = "" if value is None else str(value).strip()
-        if not raw:
-            return "开启QQ等级限制需填写最低等级"
-        try:
-            level = int(raw, 10)
-        except (TypeError, ValueError):
-            return "最低QQ等级应为整数（如 16）"
-        if level < 0 or level > MAX_QQ_LEVEL:
-            return f"最低QQ等级应在 0-{MAX_QQ_LEVEL} 之间（0=不限制）"
-        return None
-
-    @staticmethod
     def _validate_rejoin_block(gconf: dict) -> Optional[str]:
         """校验退群后再申请拦截：未开启或拦截窗口为 1 秒-90 天时返回 None。"""
         if not gconf.get("join_rejoin_block_enable"):
@@ -1697,33 +1703,7 @@ class LLMGroupGuardPlugin(Star):
                     event, group_id, user_id, flag, comment,
                     reason=rejoin["reason"],
                     extra=rejoin["extra"],
-                )
-                return
-
-            # QQ 等级限制：先于 LLM 审核查询等级，未达标直接按等级不足处理（省一次模型调用）
-            gate, level, min_level, lv_nickname, lv_reason = await self._join_level_gate(
-                event, gconf, group_id, user_id
-            )
-            if gate == "skip":
-                logger.info(
-                    f"[Guard] 入群申请无法获取QQ等级，按策略跳过自动审批: 群 {group_id} 用户 {user_id}"
-                )
-                return
-            if gate == "reject":
-                if not gconf.get("join_auto_reject_enable", True):
-                    logger.info(
-                        f"[Guard] 入群申请未达QQ等级要求，跳过自动审批: 群 {group_id} 用户 {user_id} "
-                        f"(等级={level if level is not None else '未知'}，要求≥{min_level})"
-                    )
-                    return
-                await self._reject_join(
-                    event, group_id, user_id, flag, comment,
-                    reason=lv_reason,
-                    nickname=lv_nickname,
-                    extra={
-                        "{level}": "未知" if level is None else str(level),
-                        "{min_level}": str(min_level),
-                    },
+                    source="rejoin_block",
                 )
                 return
 
@@ -1750,7 +1730,10 @@ class LLMGroupGuardPlugin(Star):
             oid_valid = has_oid and oid.isdigit() and len(oid) >= 4
             # 是否通过完全由审核判定决定（内置要求已在审核器内校验昵称+OID）
             if bool(verdict.get("allowed")):
-                await self._approve_join(event, group_id, user_id, flag, oid if oid_valid else "")
+                await self._approve_join(
+                    event, group_id, user_id, flag, oid if oid_valid else "",
+                    nickname=nickname, comment=comment,
+                )
                 return
 
             reason = str(verdict.get("reason") or "").strip() or "申请信息不满足入群要求"
@@ -1764,198 +1747,10 @@ class LLMGroupGuardPlugin(Star):
             await self._reject_join(
                 event, group_id, user_id, flag, comment,
                 reason=reason, nickname=nickname, oid=oid,
+                source="llm",
             )
         except Exception as e:
             logger.error(f"[Guard] 入群申请自动审批异常: {e}")
-
-    async def _join_level_gate(self, event, gconf: dict, group_id, user_id: str):
-        """入群审批 QQ 等级限制：达标放行，未达标/查询失败按配置处理。
-
-        返回 (gate, level, min_level, nickname, reason)：
-          gate="pass"   未开启限制、等级达标或无法获取等级且策略为放行：继续正常审核
-          gate="reject" 等级不足（或无法获取等级且策略为拒绝）：按 reason 拒绝
-          gate="skip"   无法获取等级且策略为跳过：不自动审批，留给管理员手动处理
-        level 为 None 表示无法获取申请人等级。
-        """
-        if not gconf.get("join_level_limit_enable"):
-            return "pass", None, 0, "", ""
-        raw_min = gconf.get("join_level_limit_min")
-        try:
-            # 兼容 16 与 "16"（含前后空白）；0 或不合法值视为不限制
-            min_level = int(str(raw_min).strip()) if raw_min is not None else 0
-        except (TypeError, ValueError):
-            min_level = 0
-        if min_level <= 0:
-            return "pass", None, 0, "", ""
-        level, nickname = await self._query_user_level(event.bot, group_id, user_id)
-        if level is None:
-            policy = str(gconf.get("join_level_limit_unknown") or "allow").strip().lower()
-            if policy == "reject":
-                reason = self._render_join_level_reason(gconf, user_id, nickname, None, min_level)
-                logger.info(f"[Guard] 群 {group_id} 用户 {user_id} 无法获取QQ等级，按策略拒绝")
-                return "reject", None, min_level, nickname, reason
-            if policy == "skip":
-                logger.info(f"[Guard] 群 {group_id} 用户 {user_id} 无法获取QQ等级，按策略跳过自动审批")
-                return "skip", None, min_level, nickname, ""
-            logger.debug(f"[Guard] 群 {group_id} 用户 {user_id} 无法获取QQ等级，继续正常审核")
-            return "pass", None, min_level, nickname, ""
-        if level >= min_level:
-            logger.debug(f"[Guard] 群 {group_id} 用户 {user_id} QQ等级 {level} 满足限制（≥{min_level}）")
-            return "pass", level, min_level, nickname, ""
-        reason = self._render_join_level_reason(gconf, user_id, nickname, level, min_level)
-        logger.info(
-            f"[Guard] 群 {group_id} 用户 {user_id} QQ等级 {level} 低于限制 {min_level}，按等级不足处理"
-        )
-        return "reject", level, min_level, nickname, reason
-
-    # 等级字段按接口语义区分（参考 NapCat / LLOneBot / go-cqhttp 实现）：
-    #   陌生人资料：qqLevel（NapCat）/ level（LLOneBot、Lagrange、go-cqhttp 等）
-    #   群成员资料：qq_level（NapCat）/ qqLevel（LLOneBot 等）
-    # 注意：成员资料里的 level 是「群成员等级」而非 QQ 等级，仅在 >6 时才按 QQ 等级兜底
-    _STRANGER_LEVEL_FIELDS = ("qqLevel", "qq_level", "level")
-    _MEMBER_LEVEL_FIELDS = ("qq_level", "qqLevel")
-
-    async def _query_user_level(self, bot, group_id, user_id: str):
-        """多来源查询用户 QQ 等级：陌生人资料（强制刷新 → 缓存）→ 群成员资料 → 群成员列表。
-
-        入群申请场景申请人通常不在群内，成员接口查不到，等级必须来自陌生人资料：
-        NapCat 等实现在 no_cache=True 时会向服务器拉取最新资料（本地缓存常缺 qqLevel，
-        导致读到 0），因此优先强制刷新。群成员资料/群成员列表仅在「申请人已在本群
-        （重复申请等）」时才可用：部分实现单成员接口的等级被用户资料合并覆盖为 0，
-        而成员列表接口仍返回正常值，故列表作为二级兜底。
-        所有来源都拿不到有效等级（平台未返回 / 账号隐藏等级）时返回 None，
-        交由「无法获取等级时」策略处理，而不是当成 0 级误拒。
-        """
-        uid, gid = str(user_id), str(group_id)
-        nickname = ""
-
-        # 1) 陌生人资料·强制刷新：申请人不在群时的可靠来源（实现不支持 no_cache 时会报错跳过）
-        try:
-            info = await bot.api.call_action("get_stranger_info", user_id=int(uid), no_cache=True)
-            level, nickname = self._parse_level_fields(info, self._STRANGER_LEVEL_FIELDS)
-            if level is not None:
-                return level, nickname
-        except Exception as e:
-            logger.debug(f"[Guard] 强制刷新申请人资料失败（实现可能不支持 no_cache）: 用户 {uid}: {e}")
-
-        # 1b) 陌生人资料·缓存读取（兼容不支持 no_cache 的实现）
-        try:
-            info = await bot.api.call_action("get_stranger_info", user_id=int(uid))
-            cached_level, cached_nickname = self._parse_level_fields(info, self._STRANGER_LEVEL_FIELDS)
-            if cached_level is not None:
-                return cached_level, cached_nickname or nickname
-            nickname = nickname or cached_nickname
-        except Exception as e:
-            logger.warning(f"[Guard] 查询申请人 QQ 资料失败: 用户 {uid}: {e}")
-
-        # 2) 群成员资料：仅当申请人已在本群（重复申请等）时才能查到；普通入群申请会直接报错跳过
-        member_in_group = False
-        try:
-            info = await bot.api.call_action(
-                "get_group_member_info", group_id=int(gid), user_id=int(uid), no_cache=True
-            )
-            member_in_group = True
-            member_level, member_nickname = self._parse_level_fields(info, self._MEMBER_LEVEL_FIELDS)
-            if member_level is None:
-                member_level = self._generic_member_level(info)
-            if member_level is not None:
-                return member_level, member_nickname or nickname
-            nickname = nickname or member_nickname
-        except Exception as e:
-            logger.debug(f"[Guard] 申请人当前不在群内，跳过成员资料查询: 用户 {uid}: {e}")
-
-        # 3) 群成员列表兜底：仅在确认申请人已在群内、且单成员资料无等级时才查（避免大群无谓拉取）
-        if member_in_group:
-            try:
-                members = await bot.api.call_action("get_group_member_list", group_id=int(gid))
-                if isinstance(members, (list, tuple)):
-                    for member in members:
-                        if not isinstance(member, dict) or str(member.get("user_id") or "") != uid:
-                            continue
-                        list_level, list_nickname = self._parse_level_fields(member, self._MEMBER_LEVEL_FIELDS)
-                        if list_level is None:
-                            list_level = self._generic_member_level(member)
-                        if list_level is not None:
-                            return list_level, list_nickname or nickname
-                        nickname = nickname or list_nickname
-                        break
-            except Exception as e:
-                logger.debug(f"[Guard] 查询群成员列表失败: 用户 {uid}: {e}")
-
-        logger.debug(f"[Guard] 用户 {uid} 各来源均未返回有效QQ等级（平台未提供或账号隐藏等级）")
-        return None, nickname
-
-    @classmethod
-    def _parse_level_fields(cls, info, fields) -> tuple:
-        """按字段列表从资料 dict 解析 (QQ等级, 昵称)；0、未知与超出上限均视为无效。"""
-        if not isinstance(info, dict):
-            return None, ""
-        nickname = str(info.get("nickname") or "").strip()
-        for key in fields:
-            value = cls._level_from_value(info.get(key))
-            if value is not None:
-                return value, nickname
-        return None, nickname
-
-    @classmethod
-    def _generic_member_level(cls, info):
-        """成员资料的通用 level 兜底：仅 >6 才视为 QQ 等级（NapCat 中该字段是群等级 1-6）。"""
-        if not isinstance(info, dict):
-            return None
-        value = cls._level_from_value(info.get("level"))
-        if value is not None and value > 6:
-            return value
-        return None
-
-    @classmethod
-    def _level_from_value(cls, raw):
-        """把等级字段值解析为 1-MAX_QQ_LEVEL 的整数，无法解析返回 None。
-
-        兼容：整数、字符串（含「42级」）、嵌套结构（如 {"level": 42}）以及按
-        企鹅/皇冠/太阳/月亮/星星数量返回的原始等级结构。
-        """
-        if isinstance(raw, dict):
-            for key in ("level", "qqLevel", "qq_level"):
-                value = cls._level_from_value(raw.get(key))
-                if value is not None:
-                    return value
-            parts = {
-                key: cls._level_from_value(raw.get(key)) or 0
-                for key in ("penguinNum", "crownNum", "sunNum", "moonNum", "starNum")
-            }
-            total = (
-                parts["penguinNum"] * 256
-                + parts["crownNum"] * 64
-                + parts["sunNum"] * 16
-                + parts["moonNum"] * 4
-                + parts["starNum"]
-            )
-            if 0 < total <= MAX_QQ_LEVEL:
-                return total
-            return None
-        if raw is None or isinstance(raw, bool):
-            return None
-        text = str(raw).strip()
-        if text.endswith("级"):
-            text = text[:-1].strip()
-        if text.isdigit():
-            value = int(text)
-            if 0 < value <= MAX_QQ_LEVEL:
-                return value
-        return None
-
-    @staticmethod
-    def _render_join_level_reason(gconf: dict, user_id: str, nickname: str, level, min_level: int) -> str:
-        """按模板生成等级不足的拒绝原因；{level} 未知时显示「未知」。"""
-        template = str(gconf.get("join_level_limit_reason") or "").strip()
-        if not template:
-            template = str(DEFAULT_GROUP_CONFIG.get("join_level_limit_reason") or "")
-        return _render_template(template, {
-            "{level}": "未知" if level is None else str(level),
-            "{min_level}": str(min_level),
-            "{user_id}": str(user_id),
-            "{nickname}": str(nickname or user_id),
-        }) or "申请人不满足本群入群等级要求"
 
     def _record_leave_notice(self, raw) -> bool:
         """按群配置记录一次退群事件，返回是否写入新记录。
@@ -2030,18 +1825,27 @@ class LLMGroupGuardPlugin(Star):
         """取入群审批使用的模型 ID：优先入群审批专用模型，未选择时沿用消息审核模型。"""
         return str(gconf.get(join_key) or "").strip() or str(gconf.get(guard_key) or "").strip()
 
-    async def _approve_join(self, event, group_id, user_id, flag, oid: str) -> None:
-        """同意入群并记录 OID；即使 approve 未生效（如已被人工先批），仍按 AI 审批流程处理。"""
+    async def _approve_join(
+        self, event, group_id, user_id, flag, oid: str, nickname: str = "", comment: str = ""
+    ) -> None:
+        """同意入群并记录 OID/操作；即使 approve 未生效（如已被人工先批），仍按 AI 审批流程处理。"""
         # 先写 OID 缓存再调用审批，避免进群通知先到导致欢迎漏带 OID（事件竞态）
         self._join_oid.setdefault(str(group_id), {})[str(user_id)] = oid
+        reason = "已填写昵称与OID(UID)，审核通过"
+        ok = True
         try:
             await event.bot.api.call_action(
-                "set_group_add_request", flag=flag, sub_type="add", approve=True, reason="已填写昵称与OID(UID)，审核通过"
+                "set_group_add_request", flag=flag, sub_type="add", approve=True, reason=reason
             )
             logger.info(f"[Guard] 群 {group_id} 已同意用户 {user_id} 入群（OID={oid}）")
         except Exception as e:
-            # 常见于已被人工先一步审批：不中断，仍发普通欢迎词并改名片
+            # 常见于已被人工先一步审批：记录为失败，但不中断（仍发欢迎词并改名片）
+            ok = False
             logger.warning(f"[Guard] 同意入群失败（可能已被人工审批）: 群 {group_id} 用户 {user_id}: {e}")
+        self.join_tracker.record(
+            group_id, user_id, "approve",
+            nickname=nickname, reason=reason, source="llm", ok=ok, comment=comment,
+        )
         # 用户进群后自动改名片为 QQ昵称_OID（对方需实际入群，延迟重试）
         asyncio.create_task(self._set_card_after_join(event.bot, group_id, user_id, oid))
 
@@ -2056,8 +1860,9 @@ class LLMGroupGuardPlugin(Star):
         nickname: str = "",
         oid: str = "",
         extra: Optional[dict] = None,
+        source: str = "llm",
     ) -> None:
-        """拒绝入群申请：按自定义模板回执拒绝理由，并可发送群内拒绝提示。"""
+        """拒绝入群申请：按自定义模板回执拒绝理由，记录本次操作，并可发送群内拒绝提示。"""
         gconf = self._gconf(group_id)
         reason = str(reason or "").strip() or "申请信息不满足入群要求"
         extra_vars = dict(extra or {})
@@ -2077,6 +1882,7 @@ class LLMGroupGuardPlugin(Star):
                 },
                 user_id,
             )[:180]
+        ok = True
         try:
             await event.bot.api.call_action(
                 "set_group_add_request",
@@ -2089,8 +1895,14 @@ class LLMGroupGuardPlugin(Star):
                 f"[Guard] 群 {group_id} 已拒绝用户 {user_id} 入群（原因={reason}，回执={reply!r}）"
             )
         except Exception as e:
-            # 常见于已被人工先一步审批：不中断，仅记录
+            # 常见于已被人工先一步审批：记录失败结果，不再发送群内提示
+            ok = False
             logger.warning(f"[Guard] 拒绝入群失败（可能已被人工审批）: 群 {group_id} 用户 {user_id}: {e}")
+        self.join_tracker.record(
+            group_id, user_id, "reject",
+            nickname=nickname, reason=reason, source=source, ok=ok, comment=comment,
+        )
+        if not ok:
             return
         # 群内拒绝提示（可选，留空不发送）
         notice = str(gconf.get("join_reject_notice") or "").strip()
