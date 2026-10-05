@@ -248,7 +248,7 @@ def _to_weekly_rule(start_ts: float, end_ts: float) -> dict:
     }
 
 
-@register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核与群名片锁定", "v1.5.0")
+@register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核与群名片锁定", "v1.5.1")
 class LLMGroupGuardPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -1786,7 +1786,7 @@ class LLMGroupGuardPlugin(Star):
             min_level = 0
         if min_level <= 0:
             return "pass", None, 0, "", ""
-        level, nickname = await self._query_stranger_level(event.bot, user_id)
+        level, nickname = await self._query_user_level(event.bot, group_id, user_id)
         if level is None:
             policy = str(gconf.get("join_level_limit_unknown") or "allow").strip().lower()
             if policy == "reject":
@@ -1807,27 +1807,57 @@ class LLMGroupGuardPlugin(Star):
         )
         return "reject", level, min_level, nickname, reason
 
-    @staticmethod
-    async def _query_stranger_level(bot, user_id: str):
-        """查询申请人 QQ 资料，返回 (QQ等级, 昵称)；失败或不可解析时等级为 None。
+    # QQ 等级候选字段：优先语义明确的 qq 前缀字段，最后回退通用的 level
+    _LEVEL_FIELDS = ("qqLevel", "qq_level", "qq_level_id", "level")
 
-        兼容 NapCat（qqLevel / level）、go-cqhttp 与 Lagrange（level）等实现。
+    async def _query_user_level(self, bot, group_id, user_id: str):
+        """查询用户 QQ 等级：优先陌生人资料，无效时回退群成员资料（申请人已在本群场景）。
+
+        返回 (QQ等级, 昵称)。平台未返回有效等级（字段缺失、为 0、非数字或超出 1-256）时
+        等级为 None，交由「无法获取等级时」策略处理，避免把无效的 0 当成 0 级误拒。
         """
+        level, nickname = None, ""
+        stranger_info = None
         try:
-            info = await bot.api.call_action("get_stranger_info", user_id=int(user_id))
+            stranger_info = await bot.api.call_action("get_stranger_info", user_id=int(user_id))
+            level, nickname = self._parse_level_fields(stranger_info)
         except Exception as e:
             logger.warning(f"[Guard] 查询申请人 QQ 资料失败: 用户 {user_id}: {e}")
-            return None, ""
+        if level is not None:
+            return level, nickname
+        # 申请人已在本群（重复申请等场景）：群成员资料里的等级字段通常更可靠
+        try:
+            info = await bot.api.call_action(
+                "get_group_member_info", group_id=int(group_id), user_id=int(user_id)
+            )
+            member_level, member_nickname = self._parse_level_fields(info)
+            if member_level is not None:
+                return member_level, member_nickname or nickname
+            nickname = nickname or member_nickname
+        except Exception as e:
+            logger.debug(f"[Guard] 查询群成员资料失败（可能未在本群）: 用户 {user_id}: {e}")
+        if isinstance(stranger_info, dict):
+            fields = {k: stranger_info.get(k) for k in self._LEVEL_FIELDS if k in stranger_info}
+            logger.debug(f"[Guard] 用户 {user_id} 未能解析出有效QQ等级，陌生人资料等级字段: {fields}")
+        return None, nickname
+
+    @classmethod
+    def _parse_level_fields(cls, info) -> tuple:
+        """从用户资料 dict 解析 (QQ等级, 昵称)：0、非数字或超出 1-256 均视为无效。"""
         if not isinstance(info, dict):
             return None, ""
         nickname = str(info.get("nickname") or "").strip()
-        for key in ("qqLevel", "qq_level", "level"):
+        for key in cls._LEVEL_FIELDS:
             raw = info.get(key)
             if raw is None:
                 continue
             text = str(raw).strip()
+            if text.endswith("级"):
+                text = text[:-1].strip()
             if text.isdigit():
-                return int(text), nickname
+                value = int(text)
+                if 0 < value <= 256:
+                    return value, nickname
         return None, nickname
 
     @staticmethod

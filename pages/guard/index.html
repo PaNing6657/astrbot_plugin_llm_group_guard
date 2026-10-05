@@ -251,7 +251,7 @@
               <option value="reject">按不满足等级限制拒绝</option>
               <option value="skip">跳过自动审批，留给管理员</option>
             </select>
-            <p class="hint">查询接口不可用、等级字段无法解析时按此策略处理</p>
+            <p class="hint">平台未返回有效等级（字段缺失、为 0、非数字或超出 1-256）时按此策略处理；等级会优先读陌生人资料，申请人已在本群时自动回退群成员资料</p>
           </div>
           <div class="field full">
             <label>等级不足拒绝理由</label>
@@ -508,6 +508,6 @@
 </div>
 
 <!-- module 脚本延迟执行，确保在 AstrBot 注入的 bridge SDK 之后运行 -->
-<script type="module" src="app.js?v=1.5.0"></script>
+<script type="module" src="app.js?v=1.5.1"></script>
 </body>
 </html>
