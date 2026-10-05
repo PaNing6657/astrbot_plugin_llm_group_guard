@@ -140,6 +140,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
     if (btn.dataset.tab === "violations") loadViolations();
     if (btn.dataset.tab === "schedules") loadSchedules();
     if (btn.dataset.tab === "join") loadJoin();
+    if (btn.dataset.tab === "joins") loadJoinRecords();
     if (btn.dataset.tab === "hr") loadHighRecall();
     if (btn.dataset.tab === "data") loadLocalData();
     if (btn.dataset.tab === "cardlock") loadCardLock();
@@ -286,6 +287,7 @@ async function selectGroup(gid, name, managed) {
   loadSchedules();
   loadViolations();
   loadJoin();
+  loadJoinRecords();
   loadHighRecall();
   loadCardLock();
 }
@@ -670,7 +672,6 @@ async function loadJoin() {
   $("joinCardNotifyFailMsg").value = g.join_card_notify_fail_msg || "";
   lockControls($("page-join"), !currentGroupManaged); // 非管理群：审批设置只读
   loadRejoinRecords(); // 退群记录：数据查看与清理不依赖群管理权限
-  loadJoinRecords(); // 进群记录：数据查看与清理不依赖群管理权限
 }
 $("saveJoin").addEventListener("click", async () => {
   const payload = {

@@ -4,7 +4,7 @@
 
 _✨ 全体禁言（即时/定时） + LLM 违规消息自动审核 + 入群审批 ✨_
 
-[![Plugin Version](https://img.shields.io/badge/Version-V1.7.0-blue.svg)]()
+[![Plugin Version](https://img.shields.io/badge/Version-V1.7.1-blue.svg)]()
 [![AstrBot](https://img.shields.io/badge/AstrBot-Plugin-ff69b4)](https://github.com/AstrBotDevs/AstrBot)
 [![License](https://img.shields.io/badge/License-AGPL%203.0-green.svg)](LICENSE)
 

@@ -32,6 +32,7 @@
     <button class="tab" data-tab="violations">违规记录</button>
     <button class="tab" data-tab="schedules">定时禁言</button>
     <button class="tab" data-tab="join">入群审批</button>
+    <button class="tab" data-tab="joins">进群记录</button>
     <button class="tab" data-tab="data">数据管理</button>
     <button class="tab" data-tab="cardlock">群名片锁定</button>
   </nav>
@@ -282,22 +283,6 @@
           <div class="empty" id="rejoinEmpty">暂无退群记录（开启后自动记录）</div>
         </div>
 
-        <div class="t-label" style="margin: 18px 0 8px;">进群记录（同意 / 拒绝）</div>
-        <div class="actions" style="margin: 0 0 6px;">
-          <button class="btn ghost sm" id="joinRecordsRefresh" data-allow-unmanaged="1">刷新进群记录</button>
-          <button class="btn ghost sm danger" id="joinRecordsClear" data-allow-unmanaged="1">清空本群进群记录</button>
-          <span class="toast" id="joinRecordToast"></span>
-        </div>
-        <div class="table-wrap">
-          <table class="data-table">
-            <thead>
-              <tr><th>时间</th><th>QQ 号</th><th>昵称</th><th>操作</th><th>来源</th><th>原因</th><th>申请信息</th></tr>
-            </thead>
-            <tbody id="joinRecordBody"></tbody>
-          </table>
-          <div class="empty" id="joinRecordEmpty">暂无进群操作记录（开启自动审批后自动记录）</div>
-        </div>
-
         <div class="toggle-row" style="margin: 16px 0 14px;">
           <div>
             <div class="t-label">不满足要求自动拒绝</div>
@@ -347,6 +332,32 @@
         <div class="actions">
           <button class="btn primary" id="saveJoin" data-allow-unmanaged="1">保存入群设置</button>
           <span class="toast" id="joinToast"></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- 进群记录 -->
+    <section class="page" id="page-joins">
+      <div class="page-head">
+        <h2>进群记录</h2>
+        <div class="head-actions">
+          <button class="btn ghost sm" id="joinRecordsRefresh" data-allow-unmanaged="1">刷新</button>
+          <button class="btn ghost sm danger" id="joinRecordsClear" data-allow-unmanaged="1">清空本群记录</button>
+          <span class="toast" id="joinRecordToast"></span>
+        </div>
+      </div>
+      <div class="card">
+        <div class="page-note" style="margin-bottom: 12px;">
+          记录每一次自动同意 / 拒绝入群操作：来源区分「LLM 审核」与「退群拦截」，失败操作（如已被人工先审批）也会标注；查看与清理不依赖群管理权限
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>时间</th><th>QQ 号</th><th>昵称</th><th>操作</th><th>来源</th><th>原因</th><th>申请信息</th></tr>
+            </thead>
+            <tbody id="joinRecordBody"></tbody>
+          </table>
+          <div class="empty" id="joinRecordEmpty">暂无进群操作记录（开启自动审批后自动记录）</div>
         </div>
       </div>
     </section>
@@ -494,6 +505,6 @@
 </div>
 
 <!-- module 脚本延迟执行，确保在 AstrBot 注入的 bridge SDK 之后运行 -->
-<script type="module" src="app.js?v=1.7.0"></script>
+<script type="module" src="app.js?v=1.7.1"></script>
 </body>
 </html>
