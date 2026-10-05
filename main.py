@@ -25,6 +25,7 @@ from .core.high_recall import (
     high_recall_next_flip,
     validate_high_recall_times,
 )
+from .core.leave_tracker import LeaveTracker
 from .core.permission_utils import check_group_and_permission
 from .core.whole_ban_scheduler import (
     ScheduleConflictError,
@@ -94,7 +95,12 @@ DEFAULT_GROUP_CONFIG = {
     "join_level_limit_enable": False,
     "join_level_limit_min": 16,  # 最低 QQ 等级（星星=1，月亮=4，太阳=16，皇冠=64；0=不限制）
     "join_level_limit_unknown": "allow",  # 无法获取等级时：allow=继续正常审核 / reject=按等级不足拒绝 / skip=跳过自动审批
-    "join_level_limit_reason": "很抱歉，你的QQ等级不足（当前 {level} 级，要求 {min_level} 级及以上）",
+    "join_level_limit_reason": "你的QQ等级不足（当前 {level} 级，要求 {min_level} 级及以上）",
+    # 退群记录：退群后 X 时间内再次申请直接拒绝（防退群后立刻重进）
+    "join_rejoin_block_enable": False,
+    "join_rejoin_block_seconds": 3600,  # 拦截窗口（秒）：退群后该时长内的入群申请直接拒绝
+    "join_rejoin_block_scope": "leave",  # 记录范围：leave=仅主动退群 / any=主动退群+被移出
+    "join_rejoin_block_reason": "你退群后 {window} 内不接受再次申请（已过 {elapsed}，还需等待 {remain}）",
     "join_auto_reject_enable": True,  # 不满足要求时自动拒绝（关闭则只跳过，留给管理员手动处理）
     "join_reject_reply": "很抱歉，{reason}",  # 拒绝理由（回执给申请人，受长度限制）
     "join_reject_notice": "",  # 拒绝后群内提示，支持 {at_user} {nickname} {oid} {user_id} {reason}，留空不发送
@@ -166,6 +172,34 @@ def _normalize_list_value(value) -> list:
     return out
 
 
+def _format_cn_duration(seconds) -> str:
+    """把秒数格式化为中文时长，如 1天2小时 / 45分钟 / 30秒。"""
+    try:
+        total = max(0, int(float(seconds or 0)))
+    except (TypeError, ValueError):
+        return "0秒"
+    if total <= 0:
+        return "0秒"
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, secs = divmod(rem, 60)
+    if days:
+        return f"{days}天{hours}小时" if hours else f"{days}天"
+    if hours:
+        return f"{hours}小时{minutes}分" if minutes else f"{hours}小时"
+    if minutes:
+        return f"{minutes}分{secs}秒" if secs else f"{minutes}分钟"
+    return f"{secs}秒"
+
+
+def _render_template(template: str, vars_map: dict) -> str:
+    """把 {xxx} 占位符按 vars_map 替换，并去除首尾空白。"""
+    text = str(template or "")
+    for key, value in (vars_map or {}).items():
+        text = text.replace(key, str(value))
+    return text.strip()
+
+
 _WEEKDAY_NAMES = {"一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "日": 7, "天": 7}
 _WEEKDAY_CN = {1: "周一", 2: "周二", 3: "周三", 4: "周四", 5: "周五", 6: "周六", 7: "周日"}
 
@@ -214,7 +248,7 @@ def _to_weekly_rule(start_ts: float, end_ts: float) -> dict:
     }
 
 
-@register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核与群名片锁定", "v1.4.0")
+@register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核与群名片锁定", "v1.5.0")
 class LLMGroupGuardPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -237,6 +271,8 @@ class LLMGroupGuardPlugin(Star):
         # LLM 审查器：直接复用 AstrBot 的 LLM provider，消息守卫按群取配置
         self.reviewer = LLMReviewer(config, context)
         self.guard = MessageGuard(config, self.reviewer, data_dir=str(self.data_dir), gconf_provider=self._gconf)
+        # 退群记录：成员退群时间（供「退群后 X 时间内再次申请自动拒绝」使用）
+        self.leave_tracker = LeaveTracker(self.data_dir, logger)
         # 群内最近一次缓存的 bot 客户端，供定时任务在无事件上下文时使用
         self._group_runtime: dict[str, dict] = {}
         # 审批通过者的 OID 缓存 {gid: {uid: oid}}，供成员进群事件发送欢迎时使用
@@ -289,6 +325,9 @@ class LLMGroupGuardPlugin(Star):
         self.context.register_web_api(f"{base}/card-lock/delete", self.web_card_lock_delete, ["POST"], "删除群名片锁定规则")
         self.context.register_web_api(f"{base}/card-lock/apply", self.web_card_lock_apply, ["POST"], "立即对某成员执行一次名片锁定")
         self.context.register_web_api(f"{base}/card-lock/sync", self.web_card_lock_sync, ["POST"], "读取群成员当前名片用于回填")
+        self.context.register_web_api(f"{base}/rejoin-records", self.web_rejoin_records, ["GET"], "退群记录列表")
+        self.context.register_web_api(f"{base}/rejoin-records/delete", self.web_rejoin_record_delete, ["POST"], "删除单条退群记录")
+        self.context.register_web_api(f"{base}/rejoin-records/clear", self.web_rejoin_record_clear, ["POST"], "清空某群退群记录")
 
     async def web_get_config(self):
         # GET /config?group_id=X：返回全局配置 + 该群配置
@@ -325,6 +364,9 @@ class LLMGroupGuardPlugin(Star):
                 if error:
                     return error_response(error)
                 error = self._validate_join_level(merged)
+                if error:
+                    return error_response(error)
+                error = self._validate_rejoin_block(merged)
                 if error:
                     return error_response(error)
                 was_hr_enabled = bool(gconf.get("high_recall_enable"))
@@ -621,7 +663,7 @@ class LLMGroupGuardPlugin(Star):
         ]
 
     def _local_data_index(self) -> dict:
-        """汇总本地各群数据概览：{gid: {config, schedule, violations, log}}。"""
+        """汇总本地各群数据概览：{gid: {config, schedule, violations, log, leave}}。"""
         index: dict[str, dict] = {}
         for gid in (self.config.get("groups") or {}):
             index.setdefault(str(gid), {}).setdefault("config", True)
@@ -637,6 +679,8 @@ class LLMGroupGuardPlugin(Star):
             gids = {str(e.get("gid")) for e in vlog.entries if e.get("gid")}
             for gid in gids:
                 index.setdefault(gid, {}).setdefault("log", True)
+        for gid in self.leave_tracker.records:
+            index.setdefault(str(gid), {}).setdefault("leave", True)
         return index
 
     async def web_local_data(self):
@@ -667,6 +711,63 @@ class LLMGroupGuardPlugin(Star):
             return error_response(f"清空失败：{e}")
         logger.info("[Guard] 已清空全部本地持久化数据")
         return json_response({"cleared": True, "groups": self._local_data_index()})
+
+    # ------------------------------------------------------------------
+    # WebUI：退群记录（退群后 X 时间内再次申请拦截）
+    # ------------------------------------------------------------------
+    async def web_rejoin_records(self):
+        """GET /{base}/rejoin-records?group_id=X：返回该群退群记录与拦截状态。"""
+        gid = str(request.query.get("group_id") or "").strip()
+        if not gid:
+            return error_response("缺少 group_id 参数")
+        gconf = self._gconf(gid)
+        window = self._rejoin_block_window(gconf)
+        enabled = bool(gconf.get("join_rejoin_block_enable")) and window > 0
+        now = time.time()
+        records = []
+        for row in self.leave_tracker.group_records(gid, limit=100):
+            left = float(row.get("leave_time") or 0)
+            elapsed = max(0.0, now - left) if left > 0 else 0.0
+            remain = (window - elapsed) if enabled and left > 0 else 0.0
+            records.append({
+                "user_id": row.get("user_id") or "",
+                "leave_time": left,
+                "elapsed": elapsed,
+                "remaining": remain if remain > 0 else 0.0,
+                "blocked": remain > 0,
+            })
+        return json_response({
+            "enabled": enabled,
+            "window_seconds": window,
+            "scope": str(gconf.get("join_rejoin_block_scope") or "leave"),
+            "records": records,
+        })
+
+    async def web_rejoin_record_delete(self):
+        """POST /{base}/rejoin-records/delete：删除某成员退群记录（删除后不再拦截）。"""
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象")
+        gid = str(payload.get("group_id") or "").strip()
+        uid = str(payload.get("user_id") or "").strip()
+        if not gid or not uid:
+            return error_response("缺少 group_id 或 user_id")
+        deleted = self.leave_tracker.delete(gid, uid)
+        if deleted:
+            logger.info(f"[Guard] 已删除群 {gid} 用户 {uid} 的退群记录")
+        return json_response({"deleted": deleted})
+
+    async def web_rejoin_record_clear(self):
+        """POST /{base}/rejoin-records/clear：清空某群全部退群记录。"""
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象")
+        gid = str(payload.get("group_id") or "").strip()
+        if not gid:
+            return error_response("缺少 group_id")
+        cleared = self.leave_tracker.clear(gid)
+        logger.info(f"[Guard] 已清空群 {gid} 的退群记录（{cleared}）")
+        return json_response({"cleared": cleared})
 
     # ------------------------------------------------------------------
     # WebUI：群名片锁定规则管理
@@ -882,7 +983,10 @@ class LLMGroupGuardPlugin(Star):
         vlog = getattr(self.guard, "violation_log", None)
         if vlog is not None:
             vlog.clear(gid)
-        # 4. 清理运行态缓存
+        # 4. 退群记录
+        if gid in self.leave_tracker.records:
+            self.leave_tracker.clear(gid)
+        # 5. 清理运行态缓存
         self._group_runtime.pop(gid, None)
         self._join_oid.pop(gid, None)
         self._bot_roles.pop(gid, None)
@@ -1297,6 +1401,25 @@ class LLMGroupGuardPlugin(Star):
             return "最低QQ等级应在 0-256 之间（0=不限制）"
         return None
 
+    @staticmethod
+    def _validate_rejoin_block(gconf: dict) -> Optional[str]:
+        """校验退群后再申请拦截：未开启或拦截窗口为 1 秒-90 天时返回 None。"""
+        if not gconf.get("join_rejoin_block_enable"):
+            return None
+        value = gconf.get("join_rejoin_block_seconds")
+        raw = "" if value is None else str(value).strip()
+        if not raw:
+            return "开启退群后再申请拦截需填写拦截时长"
+        try:
+            seconds = int(raw, 10)
+        except (TypeError, ValueError):
+            return "拦截时长应为整数秒（如 3600）"
+        if seconds <= 0:
+            return "拦截时长必须大于 0 秒"
+        if seconds > 90 * 86400:
+            return "拦截时长过长（最多 90 天）"
+        return None
+
     async def _set_high_recall(self, group_id, active: bool, manual: bool = False) -> bool:
         """切换高召回状态并落盘；状态实际变化时发送开关提示（无连接时排队补发）。"""
         gconf = self._gconf(group_id)
@@ -1418,7 +1541,12 @@ class LLMGroupGuardPlugin(Star):
         on_platform_loaded = _on_platform_loaded_hook()(on_platform_loaded)
 
     async def _on_native_notice(self, bot, event) -> None:
-        """处理原生 notice 事件：命中名片锁定规则时立即恢复。"""
+        """处理原生 notice 事件：退群记录 + 命中名片锁定规则时立即恢复。"""
+        # 退群记录兜底：AstrBot 消息管线可能丢弃 notice，原生回调保证不漏记
+        try:
+            self._record_leave_notice(event)
+        except Exception as e:
+            logger.error(f"[Guard] 处理退群 notice 异常: {e}")
         try:
             result = await self.card_locker.handle_card_notice(event)
         except Exception as e:
@@ -1515,6 +1643,16 @@ class LLMGroupGuardPlugin(Star):
 
     @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
     @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_group_decrease(self, event: AstrMessageEvent):
+        """成员退群事件：记录退群时间，供「退群后 X 时间内再次申请自动拒绝」使用。"""
+        try:
+            raw = getattr(event.message_obj, "raw_message", None)
+            self._record_leave_notice(raw)
+        except Exception as e:
+            logger.error(f"[Guard] 退群记录处理异常: {e}")
+
+    @filter.platform_adapter_type(filter.PlatformAdapterType.AIOCQHTTP)
+    @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_group_add_request(self, event: AstrMessageEvent):
         """入群申请事件：检测昵称+OID，齐全同意并改名片，缺失拒绝。"""
         try:
@@ -1544,6 +1682,22 @@ class LLMGroupGuardPlugin(Star):
                 return  # 该群开关关闭则不自动审批
 
             logger.info(f"[Guard] 收到入群申请: 群 {group_id} 用户 {user_id} 申请信息={comment!r}")
+
+            # 退群后 X 时间内再次申请：直接按「退群时间不足」处理（不查资料、不送审）
+            rejoin = self._rejoin_block_hit(gconf, group_id, user_id)
+            if rejoin is not None:
+                if not gconf.get("join_auto_reject_enable", True):
+                    logger.info(
+                        f"[Guard] 入群申请处于退群拦截窗口，跳过自动审批: 群 {group_id} 用户 {user_id} "
+                        f"(还需等待 {_format_cn_duration(rejoin.get('remain', 0))})"
+                    )
+                    return
+                await self._reject_join(
+                    event, group_id, user_id, flag, comment,
+                    reason=rejoin["reason"],
+                    extra=rejoin["extra"],
+                )
+                return
 
             # QQ 等级限制：先于 LLM 审核查询等级，未达标直接按等级不足处理（省一次模型调用）
             gate, level, min_level, lv_nickname, lv_reason = await self._join_level_gate(
@@ -1682,14 +1836,80 @@ class LLMGroupGuardPlugin(Star):
         template = str(gconf.get("join_level_limit_reason") or "").strip()
         if not template:
             template = str(DEFAULT_GROUP_CONFIG.get("join_level_limit_reason") or "")
-        text = (
-            template
-            .replace("{level}", "未知" if level is None else str(level))
-            .replace("{min_level}", str(min_level))
-            .replace("{user_id}", str(user_id))
-            .replace("{nickname}", str(nickname or user_id))
+        return _render_template(template, {
+            "{level}": "未知" if level is None else str(level),
+            "{min_level}": str(min_level),
+            "{user_id}": str(user_id),
+            "{nickname}": str(nickname or user_id),
+        }) or "申请人不满足本群入群等级要求"
+
+    def _record_leave_notice(self, raw) -> bool:
+        """按群配置记录一次退群事件，返回是否写入新记录。
+
+        @filter 处理器与原生 notice 回调可能同时投递同一事件，由 LeaveTracker 内部去重。
+        """
+        if not isinstance(raw, dict):
+            return False
+        if raw.get("post_type") != "notice" or raw.get("notice_type") != "group_decrease":
+            return False
+        sub_type = str(raw.get("sub_type") or "").lower()
+        if sub_type not in ("leave", "kick"):
+            return False  # kick_me（机器人自身被踢）等不记录
+        group_id = str(raw.get("group_id") or "").strip()
+        user_id = str(raw.get("user_id") or "").strip()
+        if not group_id or not user_id:
+            return False
+        self_id = str(raw.get("self_id") or "").strip()
+        if self_id and user_id == self_id:
+            return False  # 机器人自身退群/被踢
+        gconf = self._gconf(group_id)
+        if not gconf.get("join_rejoin_block_enable") or self._rejoin_block_window(gconf) <= 0:
+            return False  # 未启用拦截（或时长为 0）无需记录，避免无意义落盘
+        scope = str(gconf.get("join_rejoin_block_scope") or "leave").strip().lower()
+        if sub_type == "kick" and scope != "any":
+            return False  # 默认只记录主动退群
+        if self.leave_tracker.record(group_id, user_id):
+            logger.info(f"[Guard] 群 {group_id} 成员 {user_id} 退群（{sub_type}），已记录退群时间")
+            return True
+        return False
+
+    @staticmethod
+    def _rejoin_block_window(gconf: dict) -> float:
+        """取该群退群拦截窗口（秒）；未填写或非法时返回 0。"""
+        raw = gconf.get("join_rejoin_block_seconds")
+        try:
+            return max(0.0, float(str(raw).strip())) if raw is not None else 0.0
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _rejoin_block_hit(self, gconf: dict, group_id, user_id) -> Optional[dict]:
+        """退群后短期内再次申请：命中返回 {reason, extra, remain}，未启用/未命中返回 None。"""
+        if not gconf.get("join_rejoin_block_enable"):
+            return None
+        window = self._rejoin_block_window(gconf)
+        if window <= 0:
+            return None
+        remain = self.leave_tracker.remaining(group_id, user_id, window)
+        if remain <= 0:
+            return None
+        left_time = self.leave_tracker.get(group_id, user_id)
+        elapsed = max(0.0, time.time() - left_time) if left_time > 0 else 0.0
+        extra = {
+            "{window}": _format_cn_duration(window),
+            "{elapsed}": _format_cn_duration(elapsed),
+            "{remain}": _format_cn_duration(remain),
+            "{left_time}": time.strftime("%Y-%m-%d %H:%M", time.localtime(left_time)) if left_time > 0 else "",
+            "{user_id}": str(user_id),
+        }
+        template = str(gconf.get("join_rejoin_block_reason") or "").strip()
+        if not template:
+            template = str(DEFAULT_GROUP_CONFIG.get("join_rejoin_block_reason") or "")
+        reason = _render_template(template, extra) or "很抱歉，退群时间不足，暂不接受再次申请"
+        logger.info(
+            f"[Guard] 群 {group_id} 用户 {user_id} 退群 {_format_cn_duration(elapsed)} 后再次申请，"
+            f"处于拦截窗口（还需 {_format_cn_duration(remain)}）"
         )
-        return text.strip() or "申请人不满足本群入群等级要求"
+        return {"reason": reason, "extra": extra, "remain": remain}
 
     @staticmethod
     def _join_model(gconf: dict, join_key: str, guard_key: str) -> str:

@@ -153,6 +153,7 @@ function localTypeBadges(types) {
     schedule: '<span class="badge warn">定时任务</span>',
     violations: '<span class="badge red">违规计数</span>',
     log: '<span class="badge green">违规日志</span>',
+    leave: '<span class="badge warn">退群记录</span>',
   };
   return types.map((t) => map[t] || t).join(" ");
 }
@@ -659,12 +660,19 @@ async function loadJoin() {
   $("joinLevelLimitMin").value = g.join_level_limit_min ?? 16;
   $("joinLevelLimitUnknown").value = g.join_level_limit_unknown || "allow";
   $("joinLevelLimitReason").value = g.join_level_limit_reason || "";
+  bindToggle($("joinRejoinBlockToggle"), g.join_rejoin_block_enable);
+  const rejoinWindow = splitDurationSeconds(g.join_rejoin_block_seconds ?? 3600);
+  $("joinRejoinBlockValue").value = rejoinWindow.value;
+  $("joinRejoinBlockUnit").value = rejoinWindow.unit;
+  $("joinRejoinBlockScope").value = g.join_rejoin_block_scope || "leave";
+  $("joinRejoinBlockReason").value = g.join_rejoin_block_reason || "";
   $("joinRejectReply").value = g.join_reject_reply || "";
   $("joinRejectNotice").value = g.join_reject_notice || "";
   $("joinWelcome").value = g.join_welcome_msg || "";
   $("joinCardNotifyMsg").value = g.join_card_notify_msg || "";
   $("joinCardNotifyFailMsg").value = g.join_card_notify_fail_msg || "";
   lockControls($("page-join"), !currentGroupManaged); // 非管理群：审批设置只读
+  loadRejoinRecords(); // 退群记录：数据查看与清理不依赖群管理权限
 }
 $("saveJoin").addEventListener("click", async () => {
   const payload = {
@@ -677,6 +685,11 @@ $("saveJoin").addEventListener("click", async () => {
     join_level_limit_min: Number($("joinLevelLimitMin").value || 0),
     join_level_limit_unknown: $("joinLevelLimitUnknown").value,
     join_level_limit_reason: $("joinLevelLimitReason").value,
+    join_rejoin_block_enable: $("joinRejoinBlockToggle").classList.contains("on"),
+    join_rejoin_block_seconds:
+      Number($("joinRejoinBlockValue").value || 0) * Number($("joinRejoinBlockUnit").value || 1),
+    join_rejoin_block_scope: $("joinRejoinBlockScope").value,
+    join_rejoin_block_reason: $("joinRejoinBlockReason").value,
     join_auto_reject_enable: $("joinAutoRejectToggle").classList.contains("on"),
     join_reject_reply: $("joinRejectReply").value,
     join_reject_notice: $("joinRejectNotice").value,
@@ -691,6 +704,114 @@ $("saveJoin").addEventListener("click", async () => {
   } catch (e) {
     toast("joinToast", "保存失败：" + e, true);
   }
+});
+
+/* ---------- 退群记录（按当前群；数据查看/清理不依赖群管理权限） ---------- */
+// 秒数拆分为「数值 + 单位」，优先用能整除的最大单位（天/小时/分钟/秒）
+function splitDurationSeconds(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  for (const unit of [86400, 3600, 60]) {
+    if (total && total % unit === 0) return { value: total / unit, unit: String(unit) };
+  }
+  return { value: total, unit: "1" };
+}
+
+function formatDurationCn(seconds) {
+  const total = Math.max(0, Math.floor(Number(seconds) || 0));
+  if (total < 60) return `${total}秒`;
+  const days = Math.floor(total / 86400);
+  const hours = Math.floor((total % 86400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const parts = [];
+  if (days) parts.push(`${days}天`);
+  if (hours && parts.length < 2) parts.push(`${hours}小时`);
+  if (minutes && parts.length < 2) parts.push(`${minutes}分钟`);
+  return parts.join("") || `${total}秒`;
+}
+
+function formatDateTime(ts) {
+  const d = new Date(Number(ts) * 1000);
+  if (!ts || Number.isNaN(d.getTime())) return "-";
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+async function loadRejoinRecords() {
+  if (!currentGroup) return;
+  let data;
+  try {
+    data = await api("rejoin-records", "GET", { group_id: currentGroup });
+  } catch (e) {
+    toast("rejoinToast", "退群记录加载失败：" + e, true);
+    return;
+  }
+  const rows = data.records || [];
+  $("rejoinEmpty").classList.toggle("hidden", rows.length > 0);
+  const tbody = $("rejoinBody");
+  tbody.innerHTML = "";
+  rows.forEach((r) => {
+    const state = r.blocked
+      ? `<span class="badge red">拦截中 · 剩余 ${escapeHtml(formatDurationCn(r.remaining))}</span>`
+      : data.enabled
+      ? '<span class="badge">已过期</span>'
+      : '<span class="badge">未启用</span>';
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${escapeHtml(r.user_id)}</td>` +
+      `<td>${escapeHtml(formatDateTime(r.leave_time))}</td>` +
+      `<td>${escapeHtml(formatDurationCn(r.elapsed))}</td>` +
+      `<td>${state}</td>` +
+      `<td><button class="btn ghost sm danger" data-allow-unmanaged="1">删除</button></td>`;
+    const record = { user_id: r.user_id, btn: tr.querySelector("button"), armed: false };
+    record.btn.addEventListener("click", () => deleteRejoinRecord(record));
+    tbody.appendChild(tr);
+  });
+  bindTableOverflow();
+}
+
+// 沙箱 iframe 禁用 confirm，删除采用二次点击确认（与名片锁定一致）
+function deleteRejoinRecord(record) {
+  const btn = record.btn;
+  if (!record.armed) {
+    record.armed = true;
+    btn.textContent = "再点一次确认";
+    btn.classList.add("primary");
+    setTimeout(() => {
+      record.armed = false;
+      btn.textContent = "删除";
+      btn.classList.remove("primary");
+    }, 3000);
+    return;
+  }
+  record.armed = false;
+  api("rejoin-records/delete", "POST", { group_id: currentGroup, user_id: record.user_id })
+    .then(() => {
+      toast("rejoinToast", "已删除该退群记录（不再拦截）");
+      loadRejoinRecords();
+    })
+    .catch((e) => toast("rejoinToast", "删除失败：" + e, true));
+}
+
+$("rejoinRecordsRefresh").addEventListener("click", () => loadRejoinRecords());
+$("rejoinRecordsClear").addEventListener("click", (e) => {
+  const btn = e.currentTarget;
+  if (!btn._armed) {
+    btn._armed = true;
+    btn.textContent = "再点一次确认清空";
+    setTimeout(() => {
+      btn._armed = false;
+      btn.textContent = "清空本群退群记录";
+    }, 3000);
+    return;
+  }
+  btn._armed = false;
+  btn.textContent = "清空本群退群记录";
+  api("rejoin-records/clear", "POST", { group_id: currentGroup })
+    .then(() => {
+      toast("rejoinToast", "已清空本群退群记录");
+      loadRejoinRecords();
+    })
+    .catch((e) => toast("rejoinToast", "清空失败：" + e, true));
 });
 
 /* ---------- 高召回模式（按当前群） ---------- */
