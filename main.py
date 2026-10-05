@@ -90,6 +90,11 @@ DEFAULT_GROUP_CONFIG = {
     "join_llm_ocr_chat": "",  # 入群审批专用识图模型（审核信息含图片时使用）
     # 入群审批要求完全自定义：留空仅用内置默认要求（需同时含昵称与 OID）
     "join_prompt": "",
+    # QQ 等级限制：开启后先查申请人 QQ 等级，低于下限直接按等级不足处理（不再调用 LLM 审核）
+    "join_level_limit_enable": False,
+    "join_level_limit_min": 16,  # 最低 QQ 等级（星星=1，月亮=4，太阳=16，皇冠=64；0=不限制）
+    "join_level_limit_unknown": "allow",  # 无法获取等级时：allow=继续正常审核 / reject=按等级不足拒绝 / skip=跳过自动审批
+    "join_level_limit_reason": "很抱歉，你的QQ等级不足（当前 {level} 级，要求 {min_level} 级及以上）",
     "join_auto_reject_enable": True,  # 不满足要求时自动拒绝（关闭则只跳过，留给管理员手动处理）
     "join_reject_reply": "很抱歉，{reason}",  # 拒绝理由（回执给申请人，受长度限制）
     "join_reject_notice": "",  # 拒绝后群内提示，支持 {at_user} {nickname} {oid} {user_id} {reason}，留空不发送
@@ -209,7 +214,7 @@ def _to_weekly_rule(start_ts: float, end_ts: float) -> dict:
     }
 
 
-@register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核与群名片锁定", "v1.3.0")
+@register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核与群名片锁定", "v1.4.0")
 class LLMGroupGuardPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -317,6 +322,9 @@ class LLMGroupGuardPlugin(Star):
                 if error:
                     return error_response(error)
                 error = self._validate_merge(merged)
+                if error:
+                    return error_response(error)
+                error = self._validate_join_level(merged)
                 if error:
                     return error_response(error)
                 was_hr_enabled = bool(gconf.get("high_recall_enable"))
@@ -1272,6 +1280,23 @@ class LLMGroupGuardPlugin(Star):
             return "消息合并窗口过长（最多 600 秒），建议 5-30 秒"
         return None
 
+    @staticmethod
+    def _validate_join_level(gconf: dict) -> Optional[str]:
+        """校验入群审批 QQ 等级限制：未开启或最低等级为 0-256 的整数时返回 None。"""
+        if not gconf.get("join_level_limit_enable"):
+            return None
+        value = gconf.get("join_level_limit_min")
+        raw = "" if value is None else str(value).strip()
+        if not raw:
+            return "开启QQ等级限制需填写最低等级"
+        try:
+            level = int(raw, 10)
+        except (TypeError, ValueError):
+            return "最低QQ等级应为整数（如 16）"
+        if level < 0 or level > 256:
+            return "最低QQ等级应在 0-256 之间（0=不限制）"
+        return None
+
     async def _set_high_recall(self, group_id, active: bool, manual: bool = False) -> bool:
         """切换高召回状态并落盘；状态实际变化时发送开关提示（无连接时排队补发）。"""
         gconf = self._gconf(group_id)
@@ -1519,6 +1544,34 @@ class LLMGroupGuardPlugin(Star):
                 return  # 该群开关关闭则不自动审批
 
             logger.info(f"[Guard] 收到入群申请: 群 {group_id} 用户 {user_id} 申请信息={comment!r}")
+
+            # QQ 等级限制：先于 LLM 审核查询等级，未达标直接按等级不足处理（省一次模型调用）
+            gate, level, min_level, lv_nickname, lv_reason = await self._join_level_gate(
+                event, gconf, group_id, user_id
+            )
+            if gate == "skip":
+                logger.info(
+                    f"[Guard] 入群申请无法获取QQ等级，按策略跳过自动审批: 群 {group_id} 用户 {user_id}"
+                )
+                return
+            if gate == "reject":
+                if not gconf.get("join_auto_reject_enable", True):
+                    logger.info(
+                        f"[Guard] 入群申请未达QQ等级要求，跳过自动审批: 群 {group_id} 用户 {user_id} "
+                        f"(等级={level if level is not None else '未知'}，要求≥{min_level})"
+                    )
+                    return
+                await self._reject_join(
+                    event, group_id, user_id, flag, comment,
+                    reason=lv_reason,
+                    nickname=lv_nickname,
+                    extra={
+                        "{level}": "未知" if level is None else str(level),
+                        "{min_level}": str(min_level),
+                    },
+                )
+                return
+
             verdict = await self.reviewer.judge_join_request(
                 comment,
                 prompt=gconf.get("join_prompt") or "",
@@ -1560,6 +1613,84 @@ class LLMGroupGuardPlugin(Star):
         except Exception as e:
             logger.error(f"[Guard] 入群申请自动审批异常: {e}")
 
+    async def _join_level_gate(self, event, gconf: dict, group_id, user_id: str):
+        """入群审批 QQ 等级限制：达标放行，未达标/查询失败按配置处理。
+
+        返回 (gate, level, min_level, nickname, reason)：
+          gate="pass"   未开启限制、等级达标或无法获取等级且策略为放行：继续正常审核
+          gate="reject" 等级不足（或无法获取等级且策略为拒绝）：按 reason 拒绝
+          gate="skip"   无法获取等级且策略为跳过：不自动审批，留给管理员手动处理
+        level 为 None 表示无法获取申请人等级。
+        """
+        if not gconf.get("join_level_limit_enable"):
+            return "pass", None, 0, "", ""
+        raw_min = gconf.get("join_level_limit_min")
+        try:
+            # 兼容 16 与 "16"（含前后空白）；0 或不合法值视为不限制
+            min_level = int(str(raw_min).strip()) if raw_min is not None else 0
+        except (TypeError, ValueError):
+            min_level = 0
+        if min_level <= 0:
+            return "pass", None, 0, "", ""
+        level, nickname = await self._query_stranger_level(event.bot, user_id)
+        if level is None:
+            policy = str(gconf.get("join_level_limit_unknown") or "allow").strip().lower()
+            if policy == "reject":
+                reason = self._render_join_level_reason(gconf, user_id, nickname, None, min_level)
+                logger.info(f"[Guard] 群 {group_id} 用户 {user_id} 无法获取QQ等级，按策略拒绝")
+                return "reject", None, min_level, nickname, reason
+            if policy == "skip":
+                logger.info(f"[Guard] 群 {group_id} 用户 {user_id} 无法获取QQ等级，按策略跳过自动审批")
+                return "skip", None, min_level, nickname, ""
+            logger.debug(f"[Guard] 群 {group_id} 用户 {user_id} 无法获取QQ等级，继续正常审核")
+            return "pass", None, min_level, nickname, ""
+        if level >= min_level:
+            logger.debug(f"[Guard] 群 {group_id} 用户 {user_id} QQ等级 {level} 满足限制（≥{min_level}）")
+            return "pass", level, min_level, nickname, ""
+        reason = self._render_join_level_reason(gconf, user_id, nickname, level, min_level)
+        logger.info(
+            f"[Guard] 群 {group_id} 用户 {user_id} QQ等级 {level} 低于限制 {min_level}，按等级不足处理"
+        )
+        return "reject", level, min_level, nickname, reason
+
+    @staticmethod
+    async def _query_stranger_level(bot, user_id: str):
+        """查询申请人 QQ 资料，返回 (QQ等级, 昵称)；失败或不可解析时等级为 None。
+
+        兼容 NapCat（qqLevel / level）、go-cqhttp 与 Lagrange（level）等实现。
+        """
+        try:
+            info = await bot.api.call_action("get_stranger_info", user_id=int(user_id))
+        except Exception as e:
+            logger.warning(f"[Guard] 查询申请人 QQ 资料失败: 用户 {user_id}: {e}")
+            return None, ""
+        if not isinstance(info, dict):
+            return None, ""
+        nickname = str(info.get("nickname") or "").strip()
+        for key in ("qqLevel", "qq_level", "level"):
+            raw = info.get(key)
+            if raw is None:
+                continue
+            text = str(raw).strip()
+            if text.isdigit():
+                return int(text), nickname
+        return None, nickname
+
+    @staticmethod
+    def _render_join_level_reason(gconf: dict, user_id: str, nickname: str, level, min_level: int) -> str:
+        """按模板生成等级不足的拒绝原因；{level} 未知时显示「未知」。"""
+        template = str(gconf.get("join_level_limit_reason") or "").strip()
+        if not template:
+            template = str(DEFAULT_GROUP_CONFIG.get("join_level_limit_reason") or "")
+        text = (
+            template
+            .replace("{level}", "未知" if level is None else str(level))
+            .replace("{min_level}", str(min_level))
+            .replace("{user_id}", str(user_id))
+            .replace("{nickname}", str(nickname or user_id))
+        )
+        return text.strip() or "申请人不满足本群入群等级要求"
+
     @staticmethod
     def _join_model(gconf: dict, join_key: str, guard_key: str) -> str:
         """取入群审批使用的模型 ID：优先入群审批专用模型，未选择时沿用消息审核模型。"""
@@ -1590,10 +1721,12 @@ class LLMGroupGuardPlugin(Star):
         reason: str = "",
         nickname: str = "",
         oid: str = "",
+        extra: Optional[dict] = None,
     ) -> None:
         """拒绝入群申请：按自定义模板回执拒绝理由，并可发送群内拒绝提示。"""
         gconf = self._gconf(group_id)
         reason = str(reason or "").strip() or "申请信息不满足入群要求"
+        extra_vars = dict(extra or {})
         # 回执给申请人的理由：OneBot 通常限制在 200 字内，过长自动截断
         reply_tpl = str(gconf.get("join_reject_reply") or "").strip()
         reply = ""
@@ -1606,6 +1739,7 @@ class LLMGroupGuardPlugin(Star):
                     "{oid}": oid,
                     "{user_id}": user_id,
                     "{comment}": comment,
+                    **extra_vars,
                 },
                 user_id,
             )[:180]
@@ -1639,6 +1773,7 @@ class LLMGroupGuardPlugin(Star):
                         "{user_id}": user_id,
                         "{comment}": comment,
                         "{reason}": reason,
+                        **extra_vars,
                     },
                     user_id,
                 ),

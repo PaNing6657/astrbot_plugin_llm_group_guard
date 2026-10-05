@@ -651,10 +651,14 @@ async function loadJoin() {
   bindToggle($("joinVerifyToggle"), g.join_verify_enable);
   bindToggle($("joinAutoRejectToggle"), g.join_auto_reject_enable !== false);
   bindToggle($("joinCardNotifyToggle"), g.join_card_notify);
+  bindToggle($("joinLevelLimitToggle"), g.join_level_limit_enable);
   fillModelSelect($("joinLlmChat"), g.join_llm_chat || "", "（沿用群消息审核模型）");
   fillModelSelect($("joinLlmFallback"), g.join_llm_chat_fallback || "", "（沿用消息审核备用模型）");
   fillModelSelect($("joinLlmOcr"), g.join_llm_ocr_chat || "", "（沿用消息审核识图模型）");
   $("joinPrompt").value = g.join_prompt || "";
+  $("joinLevelLimitMin").value = g.join_level_limit_min ?? 16;
+  $("joinLevelLimitUnknown").value = g.join_level_limit_unknown || "allow";
+  $("joinLevelLimitReason").value = g.join_level_limit_reason || "";
   $("joinRejectReply").value = g.join_reject_reply || "";
   $("joinRejectNotice").value = g.join_reject_notice || "";
   $("joinWelcome").value = g.join_welcome_msg || "";
@@ -669,6 +673,10 @@ $("saveJoin").addEventListener("click", async () => {
     join_llm_chat_fallback: $("joinLlmFallback").value,
     join_llm_ocr_chat: $("joinLlmOcr").value,
     join_prompt: $("joinPrompt").value,
+    join_level_limit_enable: $("joinLevelLimitToggle").classList.contains("on"),
+    join_level_limit_min: Number($("joinLevelLimitMin").value || 0),
+    join_level_limit_unknown: $("joinLevelLimitUnknown").value,
+    join_level_limit_reason: $("joinLevelLimitReason").value,
     join_auto_reject_enable: $("joinAutoRejectToggle").classList.contains("on"),
     join_reject_reply: $("joinRejectReply").value,
     join_reject_notice: $("joinRejectNotice").value,
