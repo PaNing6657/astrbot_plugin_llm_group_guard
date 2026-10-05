@@ -241,8 +241,8 @@
         <div class="form-grid">
           <div class="field">
             <label>最低 QQ 等级</label>
-            <input type="number" id="joinLevelLimitMin" min="0" max="256" step="1" placeholder="如 16（一个太阳=16，皇冠=64）">
-            <p class="hint">0 = 不限制（等同关闭）；星星=1、月亮=4、太阳=16、皇冠=64</p>
+            <input type="number" id="joinLevelLimitMin" min="0" max="4096" step="1" placeholder="如 16（一个太阳=16，皇冠=64）">
+            <p class="hint">0 = 不限制（等同关闭）；星星=1、月亮=4、太阳=16、皇冠=64、企鹅=256（等级可超过 255）</p>
           </div>
           <div class="field">
             <label>无法获取等级时</label>
@@ -251,7 +251,7 @@
               <option value="reject">按不满足等级限制拒绝</option>
               <option value="skip">跳过自动审批，留给管理员</option>
             </select>
-            <p class="hint">平台未返回有效等级（字段缺失、为 0、非数字或超出 1-256）时按此策略处理；等级会优先读陌生人资料，申请人已在本群时自动回退群成员资料</p>
+            <p class="hint">平台未返回有效等级（字段缺失、为 0 或账号隐藏等级）时按此策略处理；入群申请优先强制刷新陌生人资料（no_cache）读取，已在本群的重复申请才会回退群成员资料；兼容 NapCat（qqLevel / qq_level）等实现</p>
           </div>
           <div class="field full">
             <label>等级不足拒绝理由</label>
@@ -508,6 +508,6 @@
 </div>
 
 <!-- module 脚本延迟执行，确保在 AstrBot 注入的 bridge SDK 之后运行 -->
-<script type="module" src="app.js?v=1.5.1"></script>
+<script type="module" src="app.js?v=1.5.2"></script>
 </body>
 </html>

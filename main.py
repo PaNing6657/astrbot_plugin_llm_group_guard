@@ -41,6 +41,7 @@ PLUGIN_NAME = "astrbot_plugin_llm_group_guard"
 CHECK_INTERVAL = 20  # 定时禁言调度循环检查间隔（秒）
 BOT_ROLE_REFRESH_INTERVAL = 60  # 机器人群内身份探测间隔（秒）
 MANAGED_ROLES = ("owner", "admin")  # 具备群管理能力的身份
+MAX_QQ_LEVEL = 4096  # QQ 等级上限（现代等级含「企鹅」=256 级/个，留足余量）
 
 # 已移除 _conf_schema.json（不提供 AstrBot 自带设置页），
 # 配置默认值内聚于此，全部由插件 WebUI 页面管理。
@@ -248,7 +249,7 @@ def _to_weekly_rule(start_ts: float, end_ts: float) -> dict:
     }
 
 
-@register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核与群名片锁定", "v1.5.1")
+@register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核与群名片锁定", "v1.5.2")
 class LLMGroupGuardPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -1397,8 +1398,8 @@ class LLMGroupGuardPlugin(Star):
             level = int(raw, 10)
         except (TypeError, ValueError):
             return "最低QQ等级应为整数（如 16）"
-        if level < 0 or level > 256:
-            return "最低QQ等级应在 0-256 之间（0=不限制）"
+        if level < 0 or level > MAX_QQ_LEVEL:
+            return f"最低QQ等级应在 0-{MAX_QQ_LEVEL} 之间（0=不限制）"
         return None
 
     @staticmethod
@@ -1807,58 +1808,141 @@ class LLMGroupGuardPlugin(Star):
         )
         return "reject", level, min_level, nickname, reason
 
-    # QQ 等级候选字段：优先语义明确的 qq 前缀字段，最后回退通用的 level
-    _LEVEL_FIELDS = ("qqLevel", "qq_level", "qq_level_id", "level")
+    # 等级字段按接口语义区分（参考 NapCat / LLOneBot / go-cqhttp 实现）：
+    #   陌生人资料：qqLevel（NapCat）/ level（LLOneBot、Lagrange、go-cqhttp 等）
+    #   群成员资料：qq_level（NapCat）/ qqLevel（LLOneBot 等）
+    # 注意：成员资料里的 level 是「群成员等级」而非 QQ 等级，仅在 >6 时才按 QQ 等级兜底
+    _STRANGER_LEVEL_FIELDS = ("qqLevel", "qq_level", "level")
+    _MEMBER_LEVEL_FIELDS = ("qq_level", "qqLevel")
 
     async def _query_user_level(self, bot, group_id, user_id: str):
-        """查询用户 QQ 等级：优先陌生人资料，无效时回退群成员资料（申请人已在本群场景）。
+        """多来源查询用户 QQ 等级：陌生人资料（强制刷新 → 缓存）→ 群成员资料 → 群成员列表。
 
-        返回 (QQ等级, 昵称)。平台未返回有效等级（字段缺失、为 0、非数字或超出 1-256）时
-        等级为 None，交由「无法获取等级时」策略处理，避免把无效的 0 当成 0 级误拒。
+        入群申请场景申请人通常不在群内，成员接口查不到，等级必须来自陌生人资料：
+        NapCat 等实现在 no_cache=True 时会向服务器拉取最新资料（本地缓存常缺 qqLevel，
+        导致读到 0），因此优先强制刷新。群成员资料/群成员列表仅在「申请人已在本群
+        （重复申请等）」时才可用：部分实现单成员接口的等级被用户资料合并覆盖为 0，
+        而成员列表接口仍返回正常值，故列表作为二级兜底。
+        所有来源都拿不到有效等级（平台未返回 / 账号隐藏等级）时返回 None，
+        交由「无法获取等级时」策略处理，而不是当成 0 级误拒。
         """
-        level, nickname = None, ""
-        stranger_info = None
+        uid, gid = str(user_id), str(group_id)
+        nickname = ""
+
+        # 1) 陌生人资料·强制刷新：申请人不在群时的可靠来源（实现不支持 no_cache 时会报错跳过）
         try:
-            stranger_info = await bot.api.call_action("get_stranger_info", user_id=int(user_id))
-            level, nickname = self._parse_level_fields(stranger_info)
+            info = await bot.api.call_action("get_stranger_info", user_id=int(uid), no_cache=True)
+            level, nickname = self._parse_level_fields(info, self._STRANGER_LEVEL_FIELDS)
+            if level is not None:
+                return level, nickname
         except Exception as e:
-            logger.warning(f"[Guard] 查询申请人 QQ 资料失败: 用户 {user_id}: {e}")
-        if level is not None:
-            return level, nickname
-        # 申请人已在本群（重复申请等场景）：群成员资料里的等级字段通常更可靠
+            logger.debug(f"[Guard] 强制刷新申请人资料失败（实现可能不支持 no_cache）: 用户 {uid}: {e}")
+
+        # 1b) 陌生人资料·缓存读取（兼容不支持 no_cache 的实现）
+        try:
+            info = await bot.api.call_action("get_stranger_info", user_id=int(uid))
+            cached_level, cached_nickname = self._parse_level_fields(info, self._STRANGER_LEVEL_FIELDS)
+            if cached_level is not None:
+                return cached_level, cached_nickname or nickname
+            nickname = nickname or cached_nickname
+        except Exception as e:
+            logger.warning(f"[Guard] 查询申请人 QQ 资料失败: 用户 {uid}: {e}")
+
+        # 2) 群成员资料：仅当申请人已在本群（重复申请等）时才能查到；普通入群申请会直接报错跳过
+        member_in_group = False
         try:
             info = await bot.api.call_action(
-                "get_group_member_info", group_id=int(group_id), user_id=int(user_id)
+                "get_group_member_info", group_id=int(gid), user_id=int(uid), no_cache=True
             )
-            member_level, member_nickname = self._parse_level_fields(info)
+            member_in_group = True
+            member_level, member_nickname = self._parse_level_fields(info, self._MEMBER_LEVEL_FIELDS)
+            if member_level is None:
+                member_level = self._generic_member_level(info)
             if member_level is not None:
                 return member_level, member_nickname or nickname
             nickname = nickname or member_nickname
         except Exception as e:
-            logger.debug(f"[Guard] 查询群成员资料失败（可能未在本群）: 用户 {user_id}: {e}")
-        if isinstance(stranger_info, dict):
-            fields = {k: stranger_info.get(k) for k in self._LEVEL_FIELDS if k in stranger_info}
-            logger.debug(f"[Guard] 用户 {user_id} 未能解析出有效QQ等级，陌生人资料等级字段: {fields}")
+            logger.debug(f"[Guard] 申请人当前不在群内，跳过成员资料查询: 用户 {uid}: {e}")
+
+        # 3) 群成员列表兜底：仅在确认申请人已在群内、且单成员资料无等级时才查（避免大群无谓拉取）
+        if member_in_group:
+            try:
+                members = await bot.api.call_action("get_group_member_list", group_id=int(gid))
+                if isinstance(members, (list, tuple)):
+                    for member in members:
+                        if not isinstance(member, dict) or str(member.get("user_id") or "") != uid:
+                            continue
+                        list_level, list_nickname = self._parse_level_fields(member, self._MEMBER_LEVEL_FIELDS)
+                        if list_level is None:
+                            list_level = self._generic_member_level(member)
+                        if list_level is not None:
+                            return list_level, list_nickname or nickname
+                        nickname = nickname or list_nickname
+                        break
+            except Exception as e:
+                logger.debug(f"[Guard] 查询群成员列表失败: 用户 {uid}: {e}")
+
+        logger.debug(f"[Guard] 用户 {uid} 各来源均未返回有效QQ等级（平台未提供或账号隐藏等级）")
         return None, nickname
 
     @classmethod
-    def _parse_level_fields(cls, info) -> tuple:
-        """从用户资料 dict 解析 (QQ等级, 昵称)：0、非数字或超出 1-256 均视为无效。"""
+    def _parse_level_fields(cls, info, fields) -> tuple:
+        """按字段列表从资料 dict 解析 (QQ等级, 昵称)；0、未知与超出上限均视为无效。"""
         if not isinstance(info, dict):
             return None, ""
         nickname = str(info.get("nickname") or "").strip()
-        for key in cls._LEVEL_FIELDS:
-            raw = info.get(key)
-            if raw is None:
-                continue
-            text = str(raw).strip()
-            if text.endswith("级"):
-                text = text[:-1].strip()
-            if text.isdigit():
-                value = int(text)
-                if 0 < value <= 256:
-                    return value, nickname
+        for key in fields:
+            value = cls._level_from_value(info.get(key))
+            if value is not None:
+                return value, nickname
         return None, nickname
+
+    @classmethod
+    def _generic_member_level(cls, info):
+        """成员资料的通用 level 兜底：仅 >6 才视为 QQ 等级（NapCat 中该字段是群等级 1-6）。"""
+        if not isinstance(info, dict):
+            return None
+        value = cls._level_from_value(info.get("level"))
+        if value is not None and value > 6:
+            return value
+        return None
+
+    @classmethod
+    def _level_from_value(cls, raw):
+        """把等级字段值解析为 1-MAX_QQ_LEVEL 的整数，无法解析返回 None。
+
+        兼容：整数、字符串（含「42级」）、嵌套结构（如 {"level": 42}）以及按
+        企鹅/皇冠/太阳/月亮/星星数量返回的原始等级结构。
+        """
+        if isinstance(raw, dict):
+            for key in ("level", "qqLevel", "qq_level"):
+                value = cls._level_from_value(raw.get(key))
+                if value is not None:
+                    return value
+            parts = {
+                key: cls._level_from_value(raw.get(key)) or 0
+                for key in ("penguinNum", "crownNum", "sunNum", "moonNum", "starNum")
+            }
+            total = (
+                parts["penguinNum"] * 256
+                + parts["crownNum"] * 64
+                + parts["sunNum"] * 16
+                + parts["moonNum"] * 4
+                + parts["starNum"]
+            )
+            if 0 < total <= MAX_QQ_LEVEL:
+                return total
+            return None
+        if raw is None or isinstance(raw, bool):
+            return None
+        text = str(raw).strip()
+        if text.endswith("级"):
+            text = text[:-1].strip()
+        if text.isdigit():
+            value = int(text)
+            if 0 < value <= MAX_QQ_LEVEL:
+                return value
+        return None
 
     @staticmethod
     def _render_join_level_reason(gconf: dict, user_id: str, nickname: str, level, min_level: int) -> str:
