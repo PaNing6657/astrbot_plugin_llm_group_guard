@@ -351,7 +351,7 @@ class LLMReviewer:
             "source": "d1",
             "probability": round(probability, 6) if probability is not None else None,
             "severity": round(severity, 4) if severity is not None else None,
-            "severity_max": max_score,
+            "severity_max": max_score if need_score else None,
         }
 
     # ------------------------------------------------------------------
