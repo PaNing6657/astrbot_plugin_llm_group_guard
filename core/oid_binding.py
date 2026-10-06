@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import re
@@ -138,3 +139,87 @@ class OidBindingStore:
             self.bindings = previous
             raise
         return count
+async def ban_oid_peers(
+    bot,
+    group_id,
+    user_id,
+    duration,
+    bindings: OidBindingStore,
+    self_id=None,
+    logger=None,
+) -> int:
+    """同步禁言当前群内同 OID 的其他绑定成员，返回成功禁言数。"""
+    try:
+        duration = int(duration)
+        primary_uid = bindings.normalize_user_id(user_id)
+        group_id_int = int(group_id)
+    except (TypeError, ValueError):
+        return 0
+    if duration <= 0:
+        return 0
+    oid = bindings.get_oid(primary_uid)
+    if not oid:
+        return 0
+    try:
+        bot_uid = bindings.normalize_user_id(self_id) if self_id else ""
+    except (TypeError, ValueError):
+        bot_uid = ""
+
+    peer_ids = [
+        uid for uid in bindings.users_for_oid(oid)
+        if uid != primary_uid and uid != bot_uid
+    ]
+    if not peer_ids:
+        return 0
+
+    def _log(level: str, message: str) -> None:
+        method = getattr(logger, level, None) if logger is not None else None
+        if callable(method):
+            method(message)
+
+    async def _ban_peer(peer_uid: str) -> bool:
+        # 查询成员信息以确认账号属于当前群，并且不越过群主/管理员保护。
+        try:
+            info = await bot.get_group_member_info(
+                group_id=group_id_int, user_id=int(peer_uid)
+            )
+        except Exception as e:
+            _log(
+                "debug",
+                f"[Guard] 跳过同 OID 账号 {peer_uid}：无法确认其在群 {group_id} 中的成员身份: {e}",
+            )
+            return False
+        if not isinstance(info, dict):
+            return False
+        actual_uid = str(info.get("user_id") or peer_uid).strip()
+        if actual_uid != peer_uid:
+            return False
+        role = str(info.get("role") or "member").strip().lower()
+        if role in ("owner", "admin"):
+            kind = "群主" if role == "owner" else "群管理员"
+            _log("info", f"[Guard] 跳过同 OID 账号 {peer_uid}：群 {group_id} 中为{kind}")
+            return False
+        try:
+            await bot.api.call_action(
+                "set_group_ban",
+                group_id=group_id_int,
+                user_id=int(peer_uid),
+                duration=duration,
+            )
+        except Exception as e:
+            _log(
+                "warning",
+                f"[Guard] 同 OID 账号禁言失败：群 {group_id} 用户 {peer_uid}，时长 {duration} 秒: {e}",
+            )
+            return False
+        _log(
+            "info",
+            f"[Guard] 已同步禁言群 {group_id} 中同 OID 账号 {peer_uid}（OID={oid}），时长 {duration} 秒",
+        )
+        return True
+
+    results = await asyncio.gather(*(_ban_peer(uid) for uid in peer_ids), return_exceptions=True)
+    for uid, result in zip(peer_ids, results):
+        if isinstance(result, Exception):
+            _log("warning", f"[Guard] 同 OID 账号 {uid} 禁言任务异常: {result}")
+    return sum(result is True for result in results)
