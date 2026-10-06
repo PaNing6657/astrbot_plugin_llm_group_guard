@@ -610,6 +610,8 @@ async function loadViolations() {
   renderViolations(data);
 }
 
+$("refreshViolations").addEventListener("click", () => loadViolations());
+
 $("resetAllViolations").addEventListener("click", async () => {
   await api("violations/reset", "POST", { group_id: currentGroup });
   loadViolations();
