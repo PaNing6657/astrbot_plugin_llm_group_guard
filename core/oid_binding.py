@@ -139,6 +139,8 @@ class OidBindingStore:
             self.bindings = previous
             raise
         return count
+
+
 async def ban_oid_peers(
     bot,
     group_id,

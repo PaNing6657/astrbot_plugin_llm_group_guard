@@ -27,7 +27,7 @@ from .core.high_recall import (
 )
 from .core.join_tracker import JoinTracker
 from .core.leave_tracker import LeaveTracker
-from .core.oid_binding import OidBindingStore
+from .core.oid_binding import OidBindingStore, ban_oid_peers
 from .core.permission_utils import check_group_and_permission
 from .core.whole_ban_scheduler import (
     ScheduleConflictError,
@@ -263,7 +263,7 @@ def _to_weekly_rule(start_ts: float, end_ts: float) -> dict:
     }
 
 
-@register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言与LLM违规审核与群名片锁定", "v1.7.1")
+@register("astrbot_plugin_llm_group_guard", "SatenShiroya", "全体禁言、LLM违规审核与QQ-OID绑定", "v1.8.1")
 class LLMGroupGuardPlugin(Star):
     def __init__(self, context: Context, config: Optional[AstrBotConfig] = None):
         super().__init__(context)
@@ -1859,7 +1859,7 @@ class LLMGroupGuardPlugin(Star):
             oid = str(verdict.get("oid") or "").strip()
             nickname = str(verdict.get("nickname") or "").strip()
             # OID 必须是纯数字：非纯数字不用于改名片，避免脏数据进入名片
-            oid_valid = has_oid and oid.isdigit() and len(oid) >= 4
+            oid_valid = has_oid and oid.isascii() and oid.isdigit() and len(oid) >= 4
             # 是否通过完全由审核判定决定（内置要求已在审核器内校验昵称+OID）
             if bool(verdict.get("allowed")):
                 await self._approve_join(
@@ -2289,73 +2289,10 @@ class LLMGroupGuardPlugin(Star):
 
     async def _ban_oid_peers(self, bot, group_id, user_id, duration, self_id=None) -> int:
         """仅在当前群内同步禁言同 OID 的绑定账号；不处理解禁，也不跨群查找。"""
-        try:
-            duration = int(duration)
-            primary_uid = self.oid_bindings.normalize_user_id(user_id)
-            group_id_int = int(group_id)
-        except (TypeError, ValueError):
-            return 0
-        if duration <= 0:
-            return 0
-        oid = self.oid_bindings.get_oid(primary_uid)
-        if not oid:
-            return 0
-        try:
-            bot_uid = self.oid_bindings.normalize_user_id(self_id) if self_id else ""
-        except (TypeError, ValueError):
-            bot_uid = ""
-
-        peer_ids = [
-            uid for uid in self.oid_bindings.users_for_oid(oid)
-            if uid != primary_uid and uid != bot_uid
-        ]
-        if not peer_ids:
-            return 0
-
-        async def _ban_peer(peer_uid: str) -> bool:
-            # 查询成员信息以确认账号属于当前群，并且不越过群主/管理员保护。
-            try:
-                info = await bot.get_group_member_info(
-                    group_id=group_id_int, user_id=int(peer_uid)
-                )
-            except Exception as e:
-                logger.debug(
-                    f"[Guard] 跳过同 OID 账号 {peer_uid}：无法确认其在群 {group_id} 中的成员身份: {e}"
-                )
-                return False
-            if not isinstance(info, dict):
-                return False
-            actual_uid = str(info.get("user_id") or peer_uid).strip()
-            if actual_uid != peer_uid:
-                return False
-            role = str(info.get("role") or "member").strip().lower()
-            if role in ("owner", "admin"):
-                logger.info(
-                    f"[Guard] 跳过同 OID 账号 {peer_uid}：群 {group_id} 中为{('群主' if role == 'owner' else '群管理员')}"
-                )
-                return False
-            try:
-                await bot.api.call_action(
-                    "set_group_ban",
-                    group_id=group_id_int,
-                    user_id=int(peer_uid),
-                    duration=duration,
-                )
-            except Exception as e:
-                logger.warning(
-                    f"[Guard] 同 OID 账号禁言失败：群 {group_id} 用户 {peer_uid}，时长 {duration} 秒: {e}"
-                )
-                return False
-            logger.info(
-                f"[Guard] 已同步禁言群 {group_id} 中同 OID 账号 {peer_uid}（OID={oid}），时长 {duration} 秒"
-            )
-            return True
-
-        results = await asyncio.gather(*(_ban_peer(uid) for uid in peer_ids), return_exceptions=True)
-        for uid, result in zip(peer_ids, results):
-            if isinstance(result, Exception):
-                logger.warning(f"[Guard] 同 OID 账号 {uid} 禁言任务异常: {result}")
-        return sum(result is True for result in results)
+        return await ban_oid_peers(
+            bot, group_id, user_id, duration, self.oid_bindings,
+            self_id=self_id, logger=logger,
+        )
 
     async def _exec_member_ban(self, event, group_id, target_qq, target_name, seconds, unban, notify: bool = True) -> bool:
         """执行对单个成员的禁言/解禁；notify=False 时静默执行（不向群里发提示）。"""
