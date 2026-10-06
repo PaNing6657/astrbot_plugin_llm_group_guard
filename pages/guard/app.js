@@ -1002,7 +1002,7 @@ $("oidBindingAdd").addEventListener("click", async () => {
   const userId = $("oidBindingUserId").value.trim();
   const oid = $("oidBindingOid").value.trim();
   if (!/^\d+$/.test(userId)) return toast("oidBindingToast", "QQ 号必须是纯数字", true);
-  if (!/^\d{4,}$/.test(oid)) return toast("oidBindingToast", "OID 必须是至少 4 位的纯数字", true);
+  if (!/^\d+$/.test(oid)) return toast("oidBindingToast", "OID 必须是纯数字（至少 1 位）", true);
   try {
     const result = await api("oid-bindings/set", "POST", { user_id: userId, oid });
     if (result.added) {

@@ -58,6 +58,9 @@ class OidBindingStoreTests(unittest.TestCase):
         self.assertEqual("7654321", self.store.get_oid("001234"))
         self.assertEqual(["001234", "002345"], self.store.users_for_oid("7654321"))
 
+        self.assertIsNone(self.store.bind("003456", "7"))
+        self.assertEqual("7", self.store.get_oid("003456"))
+
         previous_oid = self.store.bind("001234", "1234567")
         self.assertEqual("7654321", previous_oid)
         self.assertEqual(["002345"], self.store.users_for_oid("7654321"))
@@ -70,7 +73,7 @@ class OidBindingStoreTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.store.bind("qq-123", "7654321")
         with self.assertRaises(ValueError):
-            self.store.bind("123456", "123")
+            self.store.bind("123456", "12x3")
         self.assertEqual({}, self.store.bindings)
 
     def test_unbind_and_clear(self):

@@ -35,8 +35,8 @@ class OidBindingStore:
 
     @staticmethod
     def normalize_oid(oid) -> str:
-        # 与入群验证的 OID 规则一致：至少 4 位纯数字。
-        return _normalize_digits(oid, "OID", min_length=4)
+        # 与入群验证的 OID 规则一致：至少 1 位纯数字。
+        return _normalize_digits(oid, "OID")
 
     def load(self) -> None:
         self.bindings = {}

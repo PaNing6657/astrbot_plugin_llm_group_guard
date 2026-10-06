@@ -1859,7 +1859,7 @@ class LLMGroupGuardPlugin(Star):
             oid = str(verdict.get("oid") or "").strip()
             nickname = str(verdict.get("nickname") or "").strip()
             # OID 必须是纯数字：非纯数字不用于改名片，避免脏数据进入名片
-            oid_valid = has_oid and oid.isascii() and oid.isdigit() and len(oid) >= 4
+            oid_valid = has_oid and oid.isascii() and oid.isdigit()
             # 是否通过完全由审核判定决定（内置要求已在审核器内校验昵称+OID）
             if bool(verdict.get("allowed")):
                 await self._approve_join(
