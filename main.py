@@ -45,9 +45,20 @@ MANAGED_ROLES = ("owner", "admin")  # 具备群管理能力的身份
 
 # 已移除 _conf_schema.json（不提供 AstrBot 自带设置页），
 # 配置默认值内聚于此，全部由插件 WebUI 页面管理。
-# 配置分为两级：global（预留，当前为空）+ groups（每群独立策略）。
-# LLM 能力直接复用 AstrBot 已配置的 provider（群级 llm_chat 记录其 chat 模型 ID）。
-DEFAULT_GLOBAL_CONFIG = {}
+# 配置分为两级：global（全局设置，如 D1 决策模型）+ groups（每群独立策略）。
+# LLM 能力默认复用 AstrBot 已配置的 provider（群级 llm_chat 记录其 chat 模型 ID），
+# 也可为主/备用模型选择内置的 D1 决策模型（chat_id="d1"）。
+DEFAULT_GLOBAL_CONFIG = {
+    # D1 决策模型（LiquidAI）：通过 System One 接口做「是否违规」概率判定（不生成文字）
+    "d1": {
+        "api_key": "",
+        "endpoint": "https://openrouter.ai/api/v1/systemone",
+        "model": "liquid/d1",
+        "threshold": 0.7,  # 违规概率 ≥ 阈值判违规；≤ 1-阈值判合规
+        "timeout": 30,
+        "uncertain_as_violation": False,  # 概率落在不确定区间时是否按违规处理
+    },
+}
 
 DEFAULT_GROUP_CONFIG = {
     "llm_chat": "",  # 本群审核使用的 AstrBot LLM 模型 ID（如 botcf/gpt-5.6-luna）
@@ -349,6 +360,7 @@ class LLMGroupGuardPlugin(Star):
             if isinstance(gnew, dict):
                 gconf_global = self.config.setdefault("global", {})
                 gconf_global.update({k: v for k, v in gnew.items() if k in _GLOBAL_CONFIG_KEYS})
+                self._normalize_d1(gconf_global)
             gid = str(payload.get("group_id") or "").strip()
             gnew = payload.get("group")
             if gid and isinstance(gnew, dict):
@@ -459,6 +471,7 @@ class LLMGroupGuardPlugin(Star):
                 k: v for k, v in loaded.items()
                 if k in _LEGACY_GROUP_KEYS and k != "group_whitelist"
             }
+        self._normalize_d1(g)  # 合并完持久化配置后再规范化，避免默认值覆盖已保存值
         self._save_config()
 
     def _gconf(self, group_id):
@@ -477,6 +490,30 @@ class LLMGroupGuardPlugin(Star):
             groups[gid] = gconf
             self._save_config()
         return gconf
+
+    @staticmethod
+    def _normalize_d1(global_conf: dict) -> None:
+        """就地规范化全局 D1 配置（补齐默认值、约束数值范围、密钥去空格）。"""
+        defaults = DEFAULT_GLOBAL_CONFIG["d1"]
+        raw = global_conf.get("d1")
+        d1 = dict(defaults)
+        if isinstance(raw, dict):
+            d1.update({k: v for k, v in raw.items() if k in defaults})
+        d1["api_key"] = str(d1.get("api_key") or "").strip()
+        d1["endpoint"] = str(d1.get("endpoint") or "").strip() or defaults["endpoint"]
+        d1["model"] = str(d1.get("model") or "").strip() or defaults["model"]
+
+        def _num(key: str, low: float, high: float) -> float:
+            try:
+                value = float(d1.get(key, defaults[key]))
+            except (TypeError, ValueError):
+                value = float(defaults[key])
+            return min(max(value, low), high)
+
+        d1["threshold"] = round(_num("threshold", 0.05, 0.99), 2)
+        d1["timeout"] = int(_num("timeout", 5, 120))
+        d1["uncertain_as_violation"] = bool(d1.get("uncertain_as_violation"))
+        global_conf["d1"] = d1
 
     @staticmethod
     def _normalize_group_lists(gconf: dict) -> None:
@@ -1203,7 +1240,15 @@ class LLMGroupGuardPlugin(Star):
                     "id": pid,
                     "label": pid + ("（识图）" if vision else ""),
                     "vision": vision,
+                    "kind": "chat",
                 })
+        # 内置 D1 决策模型：审核主/备用模型可直接选用（前端按字段过滤，识图/入群审批不展示）
+        out.insert(0, {
+            "id": "d1",
+            "label": "D1 决策模型（LiquidAI·快速判定）",
+            "vision": False,
+            "kind": "d1",
+        })
         if not out and error:
             logger.warning(f"[Guard] 获取 AstrBot 模型列表异常: {error}")
         return json_response({"providers": out, "error": error or None})

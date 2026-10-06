@@ -57,6 +57,12 @@
         <p class="hint">将所选群的配置整体覆盖到当前群（含模型选择、审核、关键词、入群审批等全部设置，入群审批模型与拒绝说明也在其中）</p>
       </div>
       <div class="card" id="configForm"></div>
+      <!-- D1 决策模型：全局设置，所有群共用 -->
+      <div class="card" id="d1Card">
+        <h3 style="font-size:15px">D1 决策模型（全局）</h3>
+        <p class="hint">审核主/备用模型选择「D1 决策模型（LiquidAI）」时使用：通过 OpenRouter 的 System One 接口做「是否违规」概率判定，不生成文字，速度快、成本低（仅按输入 token 计费）。判定说明取本群的「审核要求」，留空时使用内置默认问题；API Key 为全局配置，所有群共用。</p>
+        <div class="form-grid wide" id="d1Form"></div>
+      </div>
       <div class="actions">
         <button class="btn primary" id="saveConfig" data-allow-unmanaged="1">保存配置</button>
         <span class="toast" id="configToast"></span>

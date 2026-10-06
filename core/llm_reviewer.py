@@ -5,7 +5,9 @@
   （llm_chat_fallback）、识图审核模型（llm_ocr_chat，需支持识图）
 - 入群审批可另选独立模型（join_llm_chat / join_llm_chat_fallback / join_llm_ocr_chat），
   未选择时由调用方回退到消息审核模型；审批要求完全自定义（join_prompt）
-- 调用通过 self.context.llm_generate(chat_provider_id=..., prompt=..., contexts=...) 完成
+- 调用通过 self.context.llm_generate(chat_provider_id=..., prompt=..., contexts=...) 完成；
+  主/备用模型选择内置的「D1 决策模型」(d1) 时改走 Liquid d1 的 System One 接口，
+  由模型直接给出「是否违规」的概率判定（不生成文字，更快、更省）
 - 图片消息审核：审核模型识图（modalities 含 image）则直接带图审核；不识图时由
   识图审核模型直接带图出判定（不转述）。主模型技术性失败自动切备用模型，
   备用模型按同样规则处理
@@ -15,6 +17,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 from typing import Optional
@@ -68,6 +71,19 @@ _MAX_IMAGES = 3  # 单条消息最多送审的图片数
 _MAX_MSG_CHARS = 2000  # 单条消息最多送审的字数
 _MAX_BATCH_CHARS = 8000  # 合并审核时整批消息正文的长度上限
 
+# D1 决策模型（LiquidAI）：通过 System One 接口做「是/否」概率判定，不生成文字。
+# 群配置里主/备用模型选择该特殊 ID 时走 HTTP 调用，其余模型仍走 AstrBot provider。
+D1_CHAT_ID = "d1"
+_D1_DEFAULT_ENDPOINT = "https://openrouter.ai/api/v1/systemone"
+_D1_DEFAULT_MODEL = "liquid/d1"
+_D1_DEFAULT_QUESTION = "这条消息是否违反群规（广告、辱骂、色情、违法等）？"
+
+
+def is_d1_model(chat_id: str) -> bool:
+    """是否为 D1 决策模型（兼容 d1 与 Liquid 免费档 d1:free）。"""
+    value = str(chat_id or "").strip().lower()
+    return value == D1_CHAT_ID or value.startswith(D1_CHAT_ID + ":")
+
 
 def extract_json_object(content: str) -> Optional[dict]:
     """从模型输出中提取 JSON 对象，容忍包裹的代码块与前后杂讯。"""
@@ -97,8 +113,8 @@ class LLMReviewer:
         self.last_error_type: str = ""  # request_fail / risk_block / parse_fail / empty_content
 
     def enabled(self) -> bool:
-        """是否具备调用能力：AstrBot 运行上下文可用（所选模型是否有效由调用方 chat_id 决定）。"""
-        return self.context is not None
+        """是否具备调用能力：AstrBot 运行上下文可用，或已配置 D1 API Key。"""
+        return self.context is not None or bool(self._d1_settings()["api_key"])
 
     async def close(self) -> None:
         """无需自持连接，无需清理。"""
@@ -123,6 +139,143 @@ class LLMReviewer:
         return False
 
     # ------------------------------------------------------------------
+    # D1 决策模型（LiquidAI System One 接口）：概率判定，不生成文字
+    # ------------------------------------------------------------------
+    def _d1_settings(self) -> dict:
+        """读取全局 D1 配置（实时读取，WebUI 保存后立即生效）。"""
+        try:
+            raw = (self.config or {}).get("global", {}).get("d1") or {}
+        except Exception:
+            raw = {}
+        if not isinstance(raw, dict):
+            raw = {}
+
+        def _num(key: str, default: float, low: float, high: float) -> float:
+            try:
+                value = float(raw.get(key, default))
+            except (TypeError, ValueError):
+                value = float(default)
+            return min(max(value, low), high)
+
+        return {
+            "api_key": str(raw.get("api_key") or "").strip(),
+            "endpoint": str(raw.get("endpoint") or _D1_DEFAULT_ENDPOINT).strip(),
+            "model": str(raw.get("model") or _D1_DEFAULT_MODEL).strip(),
+            "threshold": _num("threshold", 0.7, 0.05, 0.99),
+            "timeout": _num("timeout", 30.0, 5.0, 120.0),
+            "uncertain_as_violation": bool(raw.get("uncertain_as_violation")),
+        }
+
+    @staticmethod
+    def _d1_instruction(system: str) -> str:
+        """把聊天模型的 system 提示还原为判断题说明（去掉 JSON 输出约束）。"""
+        text = str(system or "")
+        for rule in (_JSON_RULE, _JOIN_JSON_RULE):
+            text = text.replace(rule, "")
+        return text.strip() or _D1_DEFAULT_QUESTION
+
+    @staticmethod
+    async def _http_post_json(url: str, api_key: str, payload: dict, timeout: float):
+        """POST JSON（返回 status, data）：优先 aiohttp，缺失时回退 urllib 线程调用。"""
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        try:
+            import aiohttp  # type: ignore
+
+            async with aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=timeout)
+            ) as session:
+                async with session.post(url, json=payload, headers=headers) as resp:
+                    body = await resp.text()
+                    try:
+                        return resp.status, json.loads(body)
+                    except (TypeError, ValueError):
+                        return resp.status, None
+        except ImportError:
+            pass
+
+        def _blocking():
+            import urllib.error
+            import urllib.request
+
+            request = urllib.request.Request(
+                url,
+                data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+                headers=headers,
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(request, timeout=timeout) as resp:
+                    return resp.status, json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as e:
+                try:
+                    return e.code, json.loads(e.read().decode("utf-8"))
+                except (TypeError, ValueError):
+                    return e.code, None
+
+        return await asyncio.to_thread(_blocking)
+
+    async def _ask_d1(self, user: str, instruction: str) -> Optional[dict]:
+        """D1 判定：消息作为 state、审核要求作为 Noul 判断题，按概率与阈值给结论。"""
+        cfg = self._d1_settings()
+        if not cfg["api_key"]:
+            self.last_error = "未配置 D1 API Key（WebUI 配置页 → D1 决策模型）"
+            self.last_error_type = "request_fail"
+            return None
+        payload = {
+            "model": cfg["model"],
+            "state": user,
+            "questions": {
+                "violate": {"type": "noul", "instructions": instruction},
+            },
+        }
+        try:
+            status, data = await self._http_post_json(
+                cfg["endpoint"], cfg["api_key"], payload, cfg["timeout"]
+            )
+        except Exception as e:
+            self.last_error = f"D1 请求失败: {e}"
+            self.last_error_type = "request_fail"
+            logger.error(f"[LLMReviewer] {self.last_error}")
+            return None
+        if status != 200:
+            message = ""
+            if isinstance(data, dict):
+                err = data.get("error")
+                if isinstance(err, dict):
+                    message = str(err.get("message") or "")
+                elif err:
+                    message = str(err)
+            self.last_error = f"D1 接口返回 HTTP {status}{'：' + message[:200] if message else ''}"
+            self.last_error_type = "request_fail"
+            logger.error(f"[LLMReviewer] {self.last_error}")
+            return None
+        answers = (data or {}).get("answers") or {}
+        probability = (answers.get("violate") or {}).get("noul")
+        if not isinstance(probability, (int, float)):
+            self.last_error = f"D1 响应缺少 noul 概率: {str(data)[:200]}"
+            self.last_error_type = "parse_fail"
+            return None
+        probability = float(probability)
+        threshold = float(cfg["threshold"])
+        if probability >= threshold:
+            violated = True
+        elif probability <= 1 - threshold:
+            violated = False
+        else:
+            violated = bool(cfg["uncertain_as_violation"])
+        usage = (data or {}).get("usage") or {}
+        logger.info(
+            f"[LLMReviewer] D1 判定: 违规概率 {probability:.4f}（阈值 {threshold:.2f}）→ "
+            f"{'违规' if violated else '合规'}，输入 {usage.get('input_tokens', '?')} tokens"
+        )
+        return {
+            "allowed": not violated,
+            "reason": f"D1 判定违规（命中概率 {probability * 100:.0f}%）" if violated else "",
+            "source": "d1",
+            "probability": round(probability, 6),
+        }
+
+    # ------------------------------------------------------------------
     # 核心调用：单模型生成 + JSON 解析（可带图）
     # ------------------------------------------------------------------
     async def _ask_one(
@@ -137,6 +290,9 @@ class LLMReviewer:
             self.last_error = "本群未选择 LLM 模型（llm_chat 为空）"
             self.last_error_type = "request_fail"
             return None
+        if is_d1_model(chat_id):
+            # D1 决策模型：不生成文字，直接返回「是否违规」的概率判定
+            return await self._ask_d1(user, self._d1_instruction(system))
         if self.context is None:
             self.last_error = "AstrBot 运行上下文不可用"
             self.last_error_type = "request_fail"
@@ -387,6 +543,16 @@ class LLMReviewer:
                 "reason": "入群申请信息为空",
                 "comment": "申请信息为空",
             }
+        # D1 决策模型不能提取昵称/OID 等字段，入群审批不支持：自动改用备用聊天模型
+        if is_d1_model(chat_id):
+            fb = str(fallback_chat_id or "").strip()
+            if fb and not is_d1_model(fb):
+                logger.warning(f"[LLMReviewer] 入群审批不支持 D1 决策模型，已改用备用模型 {fb}")
+                chat_id, fallback_chat_id = fb, ""
+            else:
+                self.last_error = "入群审批不支持 D1 决策模型（需提取昵称/OID），请改选聊天模型"
+                self.last_error_type = "request_fail"
+                return None
         wanted = str(prompt or "").strip()
         # 自定义要求非空则完全替换内置要求；为空时使用内置默认要求
         requirement = wanted or _DEFAULT_JOIN_PROMPT

@@ -2,10 +2,21 @@
 const bridge = window.AstrBotPluginPage;
 const $ = (id) => document.getElementById(id);
 
+// 内置 D1 决策模型（LiquidAI）：特殊 chat_id，由后端走 System One 接口判定
+const D1_ID = "d1";
+const D1_DEFAULTS = {
+  api_key: "",
+  endpoint: "https://openrouter.ai/api/v1/systemone",
+  model: "liquid/d1",
+  threshold: 0.7,
+  timeout: 30,
+  uncertain_as_violation: false,
+};
+
 /* ---------- 本群字段定义 ---------- */
 const GROUP_FIELDS = [
-  { key: "llm_chat", label: "审核 LLM 模型（主）", type: "model-select", full: true, hint: "本群消息审核与入群审批使用的主模型（来自 AstrBot 已配置的 LLM，标注（识图）的模型可直接审核图片）" },
-  { key: "llm_chat_fallback", label: "备用 LLM 模型", type: "model-select", full: true, hint: "主模型技术性失败（请求错误/空输出/解析失败）时自动切换；内容风控不切换" },
+  { key: "llm_chat", label: "审核 LLM 模型（主）", type: "model-select", full: true, allowD1: true, hint: "本群消息审核使用的主模型：可选 AstrBot 已配置的 LLM（标注（识图）的可直接审核图片）或内置「D1 决策模型（LiquidAI）」（需在下方配置 D1 API Key，更快更省）" },
+  { key: "llm_chat_fallback", label: "备用 LLM 模型", type: "model-select", full: true, allowD1: true, hint: "主模型技术性失败（请求错误/空输出/解析失败）时自动切换；内容风控不切换。也可选择 D1 决策模型" },
   { key: "llm_ocr_chat", label: "识图审核模型（识图）", type: "model-select", full: true, hint: "主/备用模型不支持识图时，由该识图模型直接带图审核并出判定；留空则仅审核文本部分" },
   { key: "guard_enable", label: "群消息违规审核", type: "toggle", hint: "关闭后 LLM 审核不生效" },
   { key: "guard_action", label: "违规处置方式", type: "select", options: ["ban", "recall", "recall_and_ban"], hint: "ban=禁言 recall=撤回 recall_and_ban=撤回并禁言" },
@@ -58,6 +69,7 @@ let currentGroup = "";
 let currentGroupName = "";
 let currentGroupManaged = true; // 机器人在当前群是否为群主/管理员
 let groupConfig = {};
+let globalD1 = {};
 let astrbotProviders = [];
 
 /* ---------- bridge 封装 ---------- */
@@ -318,8 +330,9 @@ function renderConfigForm() {
         f.options.map((o) => `<option value="${o}" ${String(val) === o ? "selected" : ""}>${o}</option>`).join("") +
         "</select>" + (f.hint ? `<div class="hint">${f.hint}</div>` : "");
     } else if (f.type === "model-select") {
-      // 本群 LLM 选择：选项来自 AstrBot 已配置的聊天模型，值即 chat provider id
-      const opts = astrbotProviders.map((p) =>
+      // 本群 LLM 选择：AstrBot 聊天模型 + 内置 D1 决策模型（D1 仅主/备用审核模型可选）
+      const list = astrbotProviders.filter((p) => p.kind !== D1_ID || f.allowD1);
+      const opts = list.map((p) =>
         `<option value="${escapeHtml(p.id)}" ${p.id === val ? "selected" : ""}>${escapeHtml(p.label || p.id)}</option>`
       ).join("");
       el.innerHTML = `<label>${f.label}</label><select data-key="${f.key}">` +
@@ -401,6 +414,50 @@ $("copyConfig").addEventListener("click", async () => {
   }
 });
 
+/* ---------- D1 决策模型（全局设置，所有群共用） ---------- */
+const D1_FIELDS = [
+  { key: "api_key", label: "D1 API Key", type: "password", full: true, hint: "OpenRouter 的 sk-or-v1-… 密钥（保存在插件配置文件中，所有群共用）" },
+  { key: "endpoint", label: "端点 URL", type: "text", full: true, hint: "默认 OpenRouter；Liquid 官方填 https://api.liquid.ai/decisions/v1/systemone" },
+  { key: "model", label: "模型 ID", type: "text", hint: "OpenRouter 用 liquid/d1；Liquid 官方用 d1 或 d1:free" },
+  { key: "threshold", label: "违规阈值（0.05-0.99）", type: "number", hint: "违规概率 ≥ 阈值判违规；≤ 1-阈值判合规" },
+  { key: "timeout", label: "请求超时（秒）", type: "number" },
+  { key: "uncertain_as_violation", label: "不确定区间按违规处理", type: "toggle", hint: "概率落在（1-阈值, 阈值）之间时是否按违规处置" },
+];
+
+function renderD1Form() {
+  const wrap = $("d1Form");
+  if (!wrap) return;
+  wrap.innerHTML = "";
+  D1_FIELDS.forEach((f) => {
+    const el = document.createElement("div");
+    el.className = "field" + (f.full ? " full" : "");
+    const val = globalD1[f.key] ?? D1_DEFAULTS[f.key];
+    if (f.type === "toggle") {
+      el.innerHTML =
+        `<div class="toggle-row"><div><div class="t-label">${f.label}</div>` +
+        (f.hint ? `<div class="t-hint">${f.hint}</div>` : "") + `</div>` +
+        `<div class="toggle ${val ? "on" : ""}" data-key="${f.key}"></div></div>`;
+      el.querySelector(".toggle").addEventListener("click", (e) => e.currentTarget.classList.toggle("on"));
+    } else {
+      el.innerHTML =
+        `<label>${f.label}</label>` +
+        `<input type="${f.type}" data-key="${f.key}" value="${escapeHtml(val ?? "")}" autocomplete="off">` +
+        (f.hint ? `<div class="hint">${f.hint}</div>` : "");
+    }
+    wrap.appendChild(el);
+  });
+  lockControls($("d1Card"), !currentGroupManaged); // 非管理群：D1 设置只读
+}
+
+function collectD1Config() {
+  const out = {};
+  document.querySelectorAll("#d1Form [data-key]").forEach((node) => {
+    const key = node.dataset.key;
+    out[key] = node.classList.contains("toggle") ? node.classList.contains("on") : node.value;
+  });
+  return out;
+}
+
 async function loadConfig() {
   try {
     const [cfgData, provData] = await Promise.all([
@@ -408,6 +465,7 @@ async function loadConfig() {
       api("providers").catch(() => ({ providers: [] })),
     ]);
     groupConfig = cfgData.group || {};
+    globalD1 = (cfgData.global || {}).d1 || {};
     astrbotProviders = (provData && provData.providers) || [];
     if ((provData && provData.error) && !astrbotProviders.length) {
       toast("configToast", "读取 AstrBot 模型列表异常：" + provData.error, true);
@@ -416,13 +474,18 @@ async function loadConfig() {
     toast("configToast", "加载配置失败：" + e, true);
   }
   renderConfigForm();
+  renderD1Form();
 }
 
 $("saveConfig").addEventListener("click", async () => {
   const btn = $("saveConfig");
   btn.disabled = true;
   try {
-    await api("config/save", "POST", { group_id: currentGroup, group: collectGroupConfig() });
+    await api("config/save", "POST", {
+      group_id: currentGroup,
+      group: collectGroupConfig(),
+      global: { d1: collectD1Config() },
+    });
     toast("configToast", "已保存");
   } catch (e) {
     toast("configToast", "保存失败：" + e, true);
@@ -630,8 +693,9 @@ function toggleHandler(e) {
 }
 
 // 模型下拉：选项来自 AstrBot 已配置模型，首项为"沿用"（空值）
-function fillModelSelect(el, value, inheritLabel) {
-  const opts = astrbotProviders.map((p) =>
+function fillModelSelect(el, value, inheritLabel, allowD1 = false) {
+  const list = astrbotProviders.filter((p) => p.kind !== D1_ID || allowD1);
+  const opts = list.map((p) =>
     `<option value="${escapeHtml(p.id)}" ${p.id === value ? "selected" : ""}>${escapeHtml(p.label || p.id)}</option>`
   ).join("");
   el.innerHTML = `<option value="" ${value ? "" : "selected"}>${escapeHtml(inheritLabel)}</option>` + opts;
@@ -902,8 +966,8 @@ async function loadHighRecall() {
   bindToggle($("hrEnableToggle"), g.high_recall_enable);
   $("hrStart").value = g.high_recall_start || "";
   $("hrEnd").value = g.high_recall_end || "";
-  fillModelSelect($("hrLlmChat"), g.high_recall_llm_chat || "", "（沿用常规审核主模型）");
-  fillModelSelect($("hrLlmFallback"), g.high_recall_llm_chat_fallback || "", "（沿用常规审核备用模型）");
+  fillModelSelect($("hrLlmChat"), g.high_recall_llm_chat || "", "（沿用常规审核主模型）", true);
+  fillModelSelect($("hrLlmFallback"), g.high_recall_llm_chat_fallback || "", "（沿用常规审核备用模型）", true);
   fillModelSelect($("hrLlmOcr"), g.high_recall_llm_ocr_chat || "", "（沿用常规审核识图模型）");
   $("hrPrompt").value = g.high_recall_prompt || "";
   $("hrOnMsg").value = g.high_recall_on_msg || "";
