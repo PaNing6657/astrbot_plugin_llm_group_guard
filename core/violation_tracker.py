@@ -69,7 +69,7 @@ class ViolationLog:
         self.path = os.path.join(str(data_dir), VIOLATION_LOG_FILE)
         self._logger = logger
         self.max_entries = max_entries
-        self.entries: List[dict] = []  # [{gid, uid, text, reason, source, ts}]
+        self.entries: List[dict] = []  # [{gid, uid, nickname, text, reason, source, ts}]
         self.load()
 
     def load(self):
@@ -90,11 +90,12 @@ class ViolationLog:
             if self._logger:
                 self._logger.error(f"违规日志持久化失败: {e}")
 
-    def add(self, group_id, user_id, text: str, reason: str, source: str) -> None:
+    def add(self, group_id, user_id, text: str, reason: str, source: str, nickname: str = "") -> None:
         """新增一条违规记录，超量丢弃最旧的。"""
         self.entries.insert(0, {
             "gid": str(group_id),
             "uid": str(user_id),
+            "nickname": str(nickname or "").strip(),
             "text": str(text)[:200],  # 截断防超长
             "reason": str(reason)[:100],
             "source": str(source),

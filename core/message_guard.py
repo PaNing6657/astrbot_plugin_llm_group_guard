@@ -692,7 +692,9 @@ class MessageGuard:
 
         # 记录违规消息日志供 WebUI 查看（合并批次记录该区间内的全部消息原文）
         if self.violation_log is not None:
-            self.violation_log.add(group_id, user_id, text, reason, source)
+            self.violation_log.add(
+                group_id, user_id, text, reason, source, nickname=self._sender_nickname(event)
+            )
 
         # 是否禁言：ban/recall_and_ban 直接禁言；纯撤回模式下按对应阈值达到次数后禁言
         if kw_settings is not None:

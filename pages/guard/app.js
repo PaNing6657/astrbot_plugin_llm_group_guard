@@ -548,10 +548,14 @@ function renderViolations(data) {
   rows.forEach(({ uid, count, type }) => {
     const typeBadge = srcBadge(type);
     const last = violationLog.find((e) => e.uid === uid && e.source === type);
+    const nickname = String((last && last.nickname) || "").trim();
+    const userLabel = nickname
+      ? `${escapeHtml(nickname)}（${escapeHtml(uid)}）`
+      : escapeHtml(uid);
     const lastText = last ? escapeHtml(last.text) : "—";
     const tr = document.createElement("tr");
     tr.innerHTML =
-      `<td>${uid}</td>` +
+      `<td>${userLabel}</td>` +
       `<td>${typeBadge}</td>` +
       `<td><span class="badge ${count >= 3 ? "red" : count >= 2 ? "warn" : "blue"}">${count} 次</span></td>` +
       `<td class="msg-cell" title="${lastText}">${lastText}</td>` +
