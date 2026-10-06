@@ -77,6 +77,13 @@ D1_CHAT_ID = "d1"
 _D1_DEFAULT_ENDPOINT = "https://openrouter.ai/api/v1/systemone"
 _D1_DEFAULT_MODEL = "liquid/d1"
 _D1_DEFAULT_QUESTION = "这条消息是否违反群规（广告、辱骂、色情、违法等）？"
+# 严重度（Score）等级：索引 0~3 即 0~3 分，用于「按严重程度判断」与分级处置
+_D1_SEVERITY_LEVELS = [
+    "正常：没有违规",
+    "轻微：边缘或轻微不当，提醒即可",
+    "明显：明确违反群规（广告、辱骂、刷屏等）",
+    "严重：恶劣或高风险内容（涉政涉黄、诈骗、恶意攻击等）",
+]
 
 
 def is_d1_model(chat_id: str) -> bool:
@@ -157,6 +164,10 @@ class LLMReviewer:
                 value = float(default)
             return min(max(value, low), high)
 
+        judge_mode = str(raw.get("judge_mode") or "noul").strip().lower()
+        if judge_mode not in ("noul", "score"):
+            judge_mode = "noul"
+        max_score = float(len(_D1_SEVERITY_LEVELS) - 1)
         return {
             "api_key": str(raw.get("api_key") or "").strip(),
             "endpoint": str(raw.get("endpoint") or _D1_DEFAULT_ENDPOINT).strip(),
@@ -164,6 +175,8 @@ class LLMReviewer:
             "threshold": _num("threshold", 0.7, 0.05, 0.99),
             "timeout": _num("timeout", 30.0, 5.0, 120.0),
             "uncertain_as_violation": bool(raw.get("uncertain_as_violation")),
+            "judge_mode": judge_mode,
+            "score_threshold": _num("score_threshold", 1.5, 0.1, max(max_score - 0.05, 0.1)),
         }
 
     @staticmethod
@@ -214,20 +227,31 @@ class LLMReviewer:
 
         return await asyncio.to_thread(_blocking)
 
-    async def _ask_d1(self, user: str, instruction: str) -> Optional[dict]:
-        """D1 判定：消息作为 state、审核要求作为 Noul 判断题，按概率与阈值给结论。"""
+    async def _ask_d1(
+        self, user: str, instruction: str, need_severity: bool = False
+    ) -> Optional[dict]:
+        """D1 判定：消息作为 state、审核要求作为判断题，按概率或严重度给结论。
+
+        按需提问：每个问题都会把 state 重新计一遍输入 token，所以只问这次真正要用的。
+        - 判定依据=概率 且 该群未开启「按严重程度决定处置」→ 只问违规概率（Noul）
+        - 判定依据=概率 且 开启了严重度处置 → 违规概率 + 严重度（Noul + Score）
+        - 判定依据=严重度 → 只问严重度（Score）
+        """
         cfg = self._d1_settings()
         if not cfg["api_key"]:
             self.last_error = "未配置 D1 API Key（WebUI 配置页 → D1 决策模型）"
             self.last_error_type = "request_fail"
             return None
-        payload = {
-            "model": cfg["model"],
-            "state": user,
-            "questions": {
-                "violate": {"type": "noul", "instructions": instruction},
-            },
-        }
+        questions: dict = {}
+        if cfg["judge_mode"] != "score":
+            questions["violate"] = {"type": "noul", "instructions": instruction}
+        if cfg["judge_mode"] == "score" or need_severity:
+            questions["severity"] = {
+                "type": "score",
+                "instructions": "这段内容的违规严重程度如何？",
+                "criteria": _D1_SEVERITY_LEVELS,
+            }
+        payload = {"model": cfg["model"], "state": user, "questions": questions}
         try:
             status, data = await self._http_post_json(
                 cfg["endpoint"], cfg["api_key"], payload, cfg["timeout"]
@@ -250,29 +274,59 @@ class LLMReviewer:
             logger.error(f"[LLMReviewer] {self.last_error}")
             return None
         answers = (data or {}).get("answers") or {}
-        probability = (answers.get("violate") or {}).get("noul")
-        if not isinstance(probability, (int, float)):
-            self.last_error = f"D1 响应缺少 noul 概率: {str(data)[:200]}"
+        raw_prob = (answers.get("violate") or {}).get("noul")
+        raw_score = (answers.get("severity") or {}).get("score")
+        probability = float(raw_prob) if isinstance(raw_prob, (int, float)) else None
+        severity = float(raw_score) if isinstance(raw_score, (int, float)) else None
+        if probability is None and severity is None:
+            self.last_error = f"D1 响应缺少 noul/score 结果: {str(data)[:200]}"
             self.last_error_type = "parse_fail"
             return None
-        probability = float(probability)
+
         threshold = float(cfg["threshold"])
-        if probability >= threshold:
-            violated = True
-        elif probability <= 1 - threshold:
-            violated = False
+        score_threshold = float(cfg["score_threshold"])
+        judge_mode = cfg["judge_mode"]
+        if judge_mode == "score" and severity is not None:
+            # 按严重程度判断：严重度 ≥ 阈值即判违规（无概率不确定区间）
+            violated = severity >= score_threshold
+        elif probability is not None:
+            if judge_mode == "score":
+                logger.warning("[LLMReviewer] D1 未返回严重度，已退回按违规概率判定")
+            if probability >= threshold:
+                violated = True
+            elif probability <= 1 - threshold:
+                violated = False
+            else:
+                violated = bool(cfg["uncertain_as_violation"])
         else:
-            violated = bool(cfg["uncertain_as_violation"])
+            violated = severity >= score_threshold
+
+        max_score = len(_D1_SEVERITY_LEVELS) - 1
+        detail = []
+        if severity is not None:
+            detail.append(f"严重度 {severity:.2f}/{max_score}")
+        if probability is not None:
+            detail.append(f"违规概率 {probability * 100:.0f}%")
         usage = (data or {}).get("usage") or {}
         logger.info(
-            f"[LLMReviewer] D1 判定: 违规概率 {probability:.4f}（阈值 {threshold:.2f}）→ "
-            f"{'违规' if violated else '合规'}，输入 {usage.get('input_tokens', '?')} tokens"
+            f"[LLMReviewer] D1 判定（按{'严重程度' if judge_mode == 'score' else '违规概率'}）: "
+            f"{'，'.join(detail) or '无结果'} → {'违规' if violated else '合规'}，"
+            f"输入 {usage.get('input_tokens', '?')} tokens"
         )
+        reason = ""
+        if violated:
+            extra = f"严重度 {severity:.1f}/{max_score}" if severity is not None else ""
+            if probability is not None:
+                prob_text = f"命中概率 {probability * 100:.0f}%"
+                extra = f"{extra}，{prob_text}" if extra else prob_text
+            reason = f"D1 判定违规（{extra}）" if extra else "D1 判定违规"
         return {
             "allowed": not violated,
-            "reason": f"D1 判定违规（命中概率 {probability * 100:.0f}%）" if violated else "",
+            "reason": reason,
             "source": "d1",
-            "probability": round(probability, 6),
+            "probability": round(probability, 6) if probability is not None else None,
+            "severity": round(severity, 4) if severity is not None else None,
+            "severity_max": max_score,
         }
 
     # ------------------------------------------------------------------
@@ -280,7 +334,7 @@ class LLMReviewer:
     # ------------------------------------------------------------------
     async def _ask_one(
         self, chat_id: str, system: str, user: str, image_urls: list = None,
-        force_vision: bool = False,
+        force_vision: bool = False, need_severity: bool = False,
     ) -> Optional[dict]:
         """对单个模型发起生成并解析 JSON 结果；识图模型直接带图审核。
 
@@ -291,8 +345,8 @@ class LLMReviewer:
             self.last_error_type = "request_fail"
             return None
         if is_d1_model(chat_id):
-            # D1 决策模型：不生成文字，直接返回「是否违规」的概率判定
-            return await self._ask_d1(user, self._d1_instruction(system))
+            # D1 决策模型：不生成文字，直接返回「是否违规」的判定
+            return await self._ask_d1(user, self._d1_instruction(system), need_severity)
         if self.context is None:
             self.last_error = "AstrBot 运行上下文不可用"
             self.last_error_type = "request_fail"
@@ -350,6 +404,7 @@ class LLMReviewer:
         user: str,
         image_urls: list = None,
         ocr_chat_id: str = "",
+        need_severity: bool = False,
     ) -> Optional[dict]:
         """主模型审核；技术性失败自动切备用。审核模型不识图时由识图模型直接带图出判定。"""
         image_urls = list(image_urls or [])
@@ -358,7 +413,9 @@ class LLMReviewer:
         # 主模型阶段：不识图且有图 → 识图审核模型直接带图审核（判定即最终结果）
         if image_urls and not self.model_supports_image(chat_id):
             if ocr and ocr != chat_id:
-                result = await self._ask_one(ocr, system, user, image_urls, force_vision=True)
+                result = await self._ask_one(
+                    ocr, system, user, image_urls, force_vision=True, need_severity=need_severity
+                )
                 if result is not None:
                     return result
                 if self.last_error_type == "risk_block":
@@ -368,10 +425,11 @@ class LLMReviewer:
                 )
             # 未配置/失败：主模型纯文本审核
             return await self._ask_one(
-                chat_id, system, self._text_only_user(user, len(image_urls))
+                chat_id, system, self._text_only_user(user, len(image_urls)),
+                need_severity=need_severity,
             )
 
-        result = await self._ask_one(chat_id, system, user, image_urls)
+        result = await self._ask_one(chat_id, system, user, image_urls, need_severity=need_severity)
         if result is not None:
             return result
 
@@ -382,7 +440,9 @@ class LLMReviewer:
             if image_urls and not self.model_supports_image(fb):
                 # 兜底模型也不识图：识图审核模型直接带图审核
                 if ocr and ocr != fb:
-                    result = await self._ask_one(ocr, system, user, image_urls, force_vision=True)
+                    result = await self._ask_one(
+                        ocr, system, user, image_urls, force_vision=True, need_severity=need_severity
+                    )
                     if result is not None:
                         logger.info(
                             f"[LLMReviewer] 主模型 {chat_id} 失败，兜底 {fb} 不识图，"
@@ -395,10 +455,11 @@ class LLMReviewer:
                         return None
                 # 识图模型不可用：兜底纯文本审核
                 result = await self._ask_one(
-                    fb, system, self._text_only_user(user, len(image_urls))
+                    fb, system, self._text_only_user(user, len(image_urls)),
+                    need_severity=need_severity,
                 )
             else:
-                result = await self._ask_one(fb, system, user, image_urls)
+                result = await self._ask_one(fb, system, user, image_urls, need_severity=need_severity)
             if result is not None:
                 logger.info(
                     f"[LLMReviewer] 主模型 {chat_id} 失败，已切换到备用 {fb}: {prior}"
@@ -419,6 +480,7 @@ class LLMReviewer:
         fallback_chat_id: str = "",
         image_urls: list = None,
         ocr_chat_id: str = "",
+        need_severity: bool = False,
     ) -> Optional[dict]:
         """判定一条群消息（可含图片）是否违规。违规时 allowed 为 false。
 
@@ -432,6 +494,7 @@ class LLMReviewer:
             fallback_chat_id=fallback_chat_id,
             image_urls=image_urls,
             ocr_chat_id=ocr_chat_id,
+            need_severity=need_severity,
         )
 
     @staticmethod
@@ -470,6 +533,7 @@ class LLMReviewer:
         fallback_chat_id: str = "",
         image_urls: list = None,
         ocr_chat_id: str = "",
+        need_severity: bool = False,
     ) -> Optional[dict]:
         """判定一批（同一成员短时间内连续发送的）群消息是否违规。
 
@@ -478,6 +542,7 @@ class LLMReviewer:
         chat_id 为该群选用的 AstrBot 聊天模型，fallback_chat_id 为备用模型；
         image_urls 为这批消息中的图片（与文本一起送审，识图模型直接看图判定），
         ocr_chat_id 为识图审核模型（审核模型不识图时由它直接带图出判定）。
+        need_severity 为 True 时（该群开启了「按严重程度决定处置」）额外询问严重度分数。
         当模型输出触发风控特征时，返回带 source="risk_block" 的疑似违规判定；
         其余失败返回 None。
         """
@@ -495,7 +560,7 @@ class LLMReviewer:
             user = f"{user}\n{note}"
         result = await self._ask(
             chat_id, fallback_chat_id, system, user,
-            image_urls=image_urls, ocr_chat_id=ocr_chat_id,
+            image_urls=image_urls, ocr_chat_id=ocr_chat_id, need_severity=need_severity,
         )
         if result is None and self.last_error_type == "risk_block":
             return {

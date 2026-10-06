@@ -11,6 +11,8 @@ const D1_DEFAULTS = {
   threshold: 0.7,
   timeout: 30,
   uncertain_as_violation: false,
+  judge_mode: "noul",
+  score_threshold: 1.5,
 };
 
 /* ---------- 本群字段定义 ---------- */
@@ -20,6 +22,8 @@ const GROUP_FIELDS = [
   { key: "llm_ocr_chat", label: "识图审核模型（识图）", type: "model-select", full: true, hint: "主/备用模型不支持识图时，由该识图模型直接带图审核并出判定；留空则仅审核文本部分" },
   { key: "guard_enable", label: "群消息违规审核", type: "toggle", hint: "关闭后 LLM 审核不生效" },
   { key: "guard_action", label: "违规处置方式", type: "select", options: ["ban", "recall", "recall_and_ban"], hint: "ban=禁言 recall=撤回 recall_and_ban=撤回并禁言" },
+  { key: "guard_severity_action_enable", label: "按严重程度决定处置", type: "toggle", hint: "D1 判定违规时按严重度自动选择：达到下方阈值→撤回并禁言；未达到→仅撤回（仅对 D1 决策模型生效，其他聊天模型仍用上方处置方式）" },
+  { key: "guard_severity_ban_score", label: "撤回并禁言的严重度阈值", type: "number", hint: "严重度 ≥ 该值→撤回并禁言；低于→仅撤回。严重度 0~3（正常0/轻微1/明显2/严重3），建议 2.5；「仅撤回」仍受「撤回 N 次自动禁言」约束，设为 0 可关闭该升级" },
   { key: "guard_ban_seconds", label: "基础禁言时长（秒）", type: "text", hint: "阶梯第一档，支持 30-120 随机范围" },
   { key: "guard_stair_enable", label: "阶梯禁言", type: "toggle", hint: "违规次数越多禁言越久" },
   { key: "guard_stair_multiplier", label: "阶梯倍数", type: "number" },
@@ -419,7 +423,9 @@ const D1_FIELDS = [
   { key: "api_key", label: "D1 API Key", type: "password", full: true, hint: "OpenRouter 的 sk-or-v1-… 密钥（保存在插件配置文件中，所有群共用）" },
   { key: "endpoint", label: "端点 URL", type: "text", full: true, hint: "默认 OpenRouter；Liquid 官方填 https://api.liquid.ai/decisions/v1/systemone" },
   { key: "model", label: "模型 ID", type: "text", hint: "OpenRouter 用 liquid/d1；Liquid 官方用 d1 或 d1:free" },
-  { key: "threshold", label: "违规阈值（0.05-0.99）", type: "number", hint: "违规概率 ≥ 阈值判违规；≤ 1-阈值判合规" },
+  { key: "threshold", label: "违规概率阈值（0.05-0.99）", type: "number", hint: "按概率判断时：违规概率 ≥ 阈值判违规；≤ 1-阈值判合规" },
+  { key: "judge_mode", label: "判定依据", type: "select", options: [["noul", "违规概率（Noul）"], ["score", "严重程度（Score）"]], hint: "选「严重程度」时按严重度分数判违规（D1 会同时返回违规概率与严重度）" },
+  { key: "score_threshold", label: "严重度违规阈值（0.1-2.9）", type: "number", hint: "仅「判定依据=严重程度」时生效：严重度 ≥ 该值判违规（0~3 分，建议 1.5）" },
   { key: "timeout", label: "请求超时（秒）", type: "number" },
   { key: "uncertain_as_violation", label: "不确定区间按违规处理", type: "toggle", hint: "概率落在（1-阈值, 阈值）之间时是否按违规处置" },
 ];
@@ -438,6 +444,13 @@ function renderD1Form() {
         (f.hint ? `<div class="t-hint">${f.hint}</div>` : "") + `</div>` +
         `<div class="toggle ${val ? "on" : ""}" data-key="${f.key}"></div></div>`;
       el.querySelector(".toggle").addEventListener("click", (e) => e.currentTarget.classList.toggle("on"));
+    } else if (f.type === "select") {
+      el.innerHTML =
+        `<label>${f.label}</label><select data-key="${f.key}">` +
+        f.options.map(([value, text]) =>
+          `<option value="${value}" ${String(val) === value ? "selected" : ""}>${escapeHtml(text)}</option>`
+        ).join("") +
+        `</select>` + (f.hint ? `<div class="hint">${f.hint}</div>` : "");
     } else {
       el.innerHTML =
         `<label>${f.label}</label>` +

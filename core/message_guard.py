@@ -266,6 +266,8 @@ class MessageGuard:
             "chat_id": _pick("high_recall_llm_chat", "llm_chat"),
             "fallback_chat_id": _pick("high_recall_llm_chat_fallback", "llm_chat_fallback"),
             "ocr_chat_id": _pick("high_recall_llm_ocr_chat", "llm_ocr_chat"),
+            # 开启「按严重程度决定处置」时才需要 D1 额外返回严重度（多问一个问题=多一份输入计费）
+            "severity_action": bool(gconf.get("guard_severity_action_enable")),
         }
 
     @staticmethod
@@ -396,6 +398,7 @@ class MessageGuard:
             fallback_chat_id=settings["fallback_chat_id"],
             image_urls=image_urls,
             ocr_chat_id=settings["ocr_chat_id"],
+            need_severity=settings["severity_action"],
         )
         if verdict is None:
             logger.warning(
@@ -425,6 +428,7 @@ class MessageGuard:
         await self._apply_action(
             event, group_id, user_id, message_id, log_text,
             reason=reason, tracker=self.violation_tracker, source="llm", gconf=gconf,
+            severity=verdict.get("severity"),
         )
         self._mark_handled(key)
         return True
@@ -566,6 +570,7 @@ class MessageGuard:
             fallback_chat_id=settings["fallback_chat_id"],
             image_urls=self._collect_image_urls(events, self._extract_image_urls),
             ocr_chat_id=settings["ocr_chat_id"],
+            need_severity=settings["severity_action"],
         )
         if verdict is None:
             logger.warning(
@@ -605,6 +610,7 @@ class MessageGuard:
             source="llm",
             gconf=gconf,
             batch_size=size,
+            severity=verdict.get("severity"),
         )
 
     def _batch_exempt(self, gconf: dict, user_id: str, event) -> bool:
@@ -635,6 +641,18 @@ class MessageGuard:
         for event in events:
             self._mark_handled(self._msg_key(event))
 
+    @staticmethod
+    def _severity_action(gconf: dict, severity: Optional[float]) -> Optional[str]:
+        """按严重程度决定处置：≥ 阈值→recall_and_ban，否则→recall；未启用/无严重度返回 None。"""
+        if severity is None or not gconf.get("guard_severity_action_enable"):
+            return None
+        try:
+            threshold = float(gconf.get("guard_severity_ban_score", 2.5))
+            value = float(severity)
+        except (TypeError, ValueError):
+            return None
+        return "recall_and_ban" if value >= threshold else "recall"
+
     async def _apply_action(
         self,
         event: AiocqhttpMessageEvent,
@@ -648,14 +666,22 @@ class MessageGuard:
         gconf: Optional[dict] = None,
         kw_settings: Optional[dict] = None,
         batch_size: int = 1,
+        severity: Optional[float] = None,
     ) -> None:
-        """执行处置。message_id 支持单条，也支持列表（合并审核时整批撤回）。"""
+        """执行处置。message_id 支持单条，也支持列表（合并审核时整批撤回）。
+
+        severity 为 LLM（D1 决策模型）判定附带的严重度分数；开启「按严重程度决定处置」时，
+        达到阈值走「撤回并禁言」，未达到走「仅撤回」（关键词处置不受影响）。
+        """
         gconf = gconf or self._gconf_of(group_id)
         # 关键词命中走独立处置设置（kw_settings）；LLM 违规走 guard_* 设置
         if kw_settings is not None:
             action = kw_settings["action"]
         else:
             action = (gconf.get("guard_action") or "ban").lower()
+            severity_action = self._severity_action(gconf, severity)
+            if severity_action:
+                action = severity_action
         bot = event.bot
 
         # 阶梯计数：本次违规累计次数（LLM 与轻/重关键词各自独立计数；合并批次按 1 次计）

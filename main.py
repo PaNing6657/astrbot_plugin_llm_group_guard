@@ -57,6 +57,8 @@ DEFAULT_GLOBAL_CONFIG = {
         "threshold": 0.7,  # 违规概率 ≥ 阈值判违规；≤ 1-阈值判合规
         "timeout": 30,
         "uncertain_as_violation": False,  # 概率落在不确定区间时是否按违规处理
+        "judge_mode": "noul",  # noul=按违规概率判断 / score=按严重度判断（0~3 分）
+        "score_threshold": 1.5,  # judge_mode=score 时：严重度 ≥ 该值判违规
     },
 }
 
@@ -66,6 +68,9 @@ DEFAULT_GROUP_CONFIG = {
     "llm_ocr_chat": "",  # 识图审核模型（需支持识图）：审核模型不识图时由它直接带图出判定
     "guard_enable": False,
     "guard_action": "ban",
+    # 按严重程度分级处置（D1 判定附带严重度时生效）：达到阈值→撤回并禁言，否则→仅撤回
+    "guard_severity_action_enable": False,
+    "guard_severity_ban_score": 2.5,  # 严重度（0~3）≥ 该值 → 撤回并禁言
     "guard_ban_seconds": "600",
     "guard_stair_enable": True,
     "guard_stair_multiplier": 2,
@@ -513,6 +518,9 @@ class LLMGroupGuardPlugin(Star):
         d1["threshold"] = round(_num("threshold", 0.05, 0.99), 2)
         d1["timeout"] = int(_num("timeout", 5, 120))
         d1["uncertain_as_violation"] = bool(d1.get("uncertain_as_violation"))
+        judge_mode = str(d1.get("judge_mode") or "noul").strip().lower()
+        d1["judge_mode"] = judge_mode if judge_mode in ("noul", "score") else "noul"
+        d1["score_threshold"] = round(_num("score_threshold", 0.1, 2.9), 2)
         global_conf["d1"] = d1
 
     @staticmethod
