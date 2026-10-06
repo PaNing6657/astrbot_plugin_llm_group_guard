@@ -45,11 +45,13 @@ _RECALL_INTERVAL = 0.3  # 合并批次连续撤回多条消息时的间隔（秒
 
 
 class MessageGuard:
-    def __init__(self, config: dict, reviewer: LLMReviewer, data_dir=None, gconf_provider=None):
+    def __init__(self, config: dict, reviewer: LLMReviewer, data_dir=None, gconf_provider=None, oid_ban_callback=None):
         self.config = config
         self.reviewer = reviewer
         # 按群取配置的回调（由插件传入 _gconf），缺省回退到顶层 config
         self._gconf_provider = gconf_provider
+        # 同 OID 绑定账号禁言回调（由主插件负责校验群成员、管理员和 Bot 身份）
+        self._oid_ban_callback = oid_ban_callback
         self.violation_tracker = ViolationTracker(data_dir, logger) if data_dir else None
         # 关键词违规计数：轻/重两级各自独立累计（另留旧文件兼容读取）
         self.keyword_minor_tracker = (
@@ -730,6 +732,23 @@ class MessageGuard:
                     )
                 except Exception as exc:
                     logger.warning(f"[MessageGuard] 禁言失败: {exc}。请确认 Bot 具有管理员权限。")
+                else:
+                    if self._oid_ban_callback is not None:
+                        try:
+                            self_id = str(event.get_self_id())
+                        except Exception:
+                            self_id = ""
+                        try:
+                            synced = await self._oid_ban_callback(
+                                bot, group_id, user_id, duration, self_id=self_id
+                            )
+                            if synced:
+                                logger.info(
+                                    f"[MessageGuard] 群 {group_id} 中用户 {user_id} 同 OID 账号"
+                                    f"已同步禁言 {synced} 个，时长: {duration}秒"
+                                )
+                        except Exception as exc:
+                            logger.warning(f"[MessageGuard] 同 OID 账号禁言同步失败: {exc}")
 
         notice = str(gconf.get("guard_notice") or "").strip()
         notice_gid = self._to_int_id(group_id)

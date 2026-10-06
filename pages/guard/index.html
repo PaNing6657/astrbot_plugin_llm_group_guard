@@ -33,6 +33,7 @@
     <button class="tab" data-tab="schedules">定时禁言</button>
     <button class="tab" data-tab="join">入群审批</button>
     <button class="tab" data-tab="joins">进群记录</button>
+    <button class="tab" data-tab="oid">OID绑定</button>
     <button class="tab" data-tab="data">数据管理</button>
     <button class="tab" data-tab="cardlock">群名片锁定</button>
   </nav>
@@ -369,6 +370,45 @@
       </div>
     </section>
 
+    <!-- QQ 与 OID 绑定 -->
+    <section class="page" id="page-oid">
+      <div class="page-head">
+        <h2>QQ 与 OID 绑定</h2>
+        <div class="head-actions">
+          <span class="page-note" id="oidBindingCount">共 0 条</span>
+          <button class="btn ghost sm" id="oidBindingRefresh">刷新</button>
+        </div>
+      </div>
+      <div class="card">
+        <p class="page-note" style="margin-bottom: 14px;">
+          绑定关系全局共用。入群审批验证通过且 OID 合规时会自动添加；成员触发禁言时，只会同步禁言同 OID 且当前群内的其他绑定 QQ。群主 / 管理员不会被联动禁言，解除禁言只作用于被操作的 QQ。
+        </p>
+        <div class="form-grid" style="margin-bottom: 14px;">
+          <div class="field">
+            <label for="oidBindingUserId">QQ 号</label>
+            <input type="text" id="oidBindingUserId" inputmode="numeric" placeholder="例如：123456789">
+          </div>
+          <div class="field">
+            <label for="oidBindingOid">OID</label>
+            <input type="text" id="oidBindingOid" inputmode="numeric" placeholder="至少 4 位数字">
+          </div>
+        </div>
+        <div class="actions" style="margin-bottom: 14px;">
+          <button class="btn primary" id="oidBindingAdd">添加 / 更新绑定</button>
+          <span class="toast" id="oidBindingToast"></span>
+        </div>
+        <div class="table-wrap">
+          <table class="data-table">
+            <thead>
+              <tr><th>QQ 号</th><th>OID</th><th>操作</th></tr>
+            </thead>
+            <tbody id="oidBindingBody"></tbody>
+          </table>
+          <div class="empty" id="oidBindingEmpty">暂无绑定记录</div>
+        </div>
+      </div>
+    </section>
+
     <!-- 数据管理 -->
     <section class="page" id="page-data">
       <div class="page-head">
@@ -378,7 +418,8 @@
         </div>
       </div>
       <div class="card">
-        <div class="page-note" style="margin-bottom:12px">本地持久化数据概览：删除已解散群或残留的配置 / 定时任务 / 违规记录 / 退群记录 / 进群记录（含进行中的定时禁言会先解除）</div>
+        <div class="page-note" style="margin-bottom:8px">本地持久化数据概览：删除已解散群或残留的配置 / 定时任务 / 违规记录 / 退群记录 / 进群记录（含进行中的定时禁言会先解除）。删除单群数据不会影响全局 OID 绑定。</div>
+        <div class="page-note" id="localDataGlobalNote" style="margin-bottom:12px">全局 OID 绑定：0 条；「清空全部数据」会一并清除。</div>
         <div class="table-wrap">
           <table class="data-table">
             <thead>

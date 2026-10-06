@@ -159,6 +159,7 @@ document.querySelectorAll(".tab").forEach((btn) => {
     if (btn.dataset.tab === "schedules") loadSchedules();
     if (btn.dataset.tab === "join") loadJoin();
     if (btn.dataset.tab === "joins") loadJoinRecords();
+    if (btn.dataset.tab === "oid") loadOidBindings();
     if (btn.dataset.tab === "hr") loadHighRecall();
     if (btn.dataset.tab === "data") loadLocalData();
     if (btn.dataset.tab === "cardlock") loadCardLock();
@@ -181,6 +182,7 @@ function localTypeBadges(types) {
 function renderLocalData(data) {
   // 数据结构：{groups: {gid: {config/schedule/violations/log: true}}}
   const rows = Object.entries(data.groups || {});
+  $("localDataGlobalNote").textContent = `全局 OID 绑定：${Number(data.oid_bindings_count || 0)} 条；「清空全部数据」会一并清除。`;
   $("localDataEmpty").classList.toggle("hidden", rows.length > 0);
   const tbody = $("localDataBody");
   tbody.innerHTML = "";
@@ -959,6 +961,64 @@ $("joinRecordsClear").addEventListener("click", (e) => {
     .catch((e) => toast("joinRecordToast", "清空失败：" + e, true));
 });
 
+/* ---------- 全局 QQ-OID 绑定 ---------- */
+function renderOidBindings(bindings) {
+  const rows = Array.isArray(bindings) ? bindings : [];
+  $("oidBindingCount").textContent = `共 ${rows.length} 条`;
+  $("oidBindingEmpty").classList.toggle("hidden", rows.length > 0);
+  const tbody = $("oidBindingBody");
+  tbody.innerHTML = "";
+  rows.forEach((binding) => {
+    const tr = document.createElement("tr");
+    tr.innerHTML =
+      `<td>${escapeHtml(binding.user_id || "")}</td>` +
+      `<td>${escapeHtml(binding.oid || "")}</td>` +
+      '<td><button class="btn ghost sm danger">删除</button></td>';
+    tr.querySelector("button").addEventListener("click", async () => {
+      try {
+        const result = await api("oid-bindings/delete", "POST", { user_id: binding.user_id });
+        toast("oidBindingToast", result.deleted ? "已删除该绑定" : "绑定记录不存在");
+        renderOidBindings(result.bindings || []);
+      } catch (e) {
+        toast("oidBindingToast", "删除失败：" + e, true);
+      }
+    });
+    tbody.appendChild(tr);
+  });
+  bindTableOverflow();
+}
+
+async function loadOidBindings() {
+  try {
+    const data = await api("oid-bindings");
+    renderOidBindings(data.bindings || []);
+  } catch (e) {
+    toast("oidBindingToast", "绑定列表加载失败：" + e, true);
+  }
+}
+
+$("oidBindingRefresh").addEventListener("click", () => loadOidBindings());
+$("oidBindingAdd").addEventListener("click", async () => {
+  const userId = $("oidBindingUserId").value.trim();
+  const oid = $("oidBindingOid").value.trim();
+  if (!/^\d+$/.test(userId)) return toast("oidBindingToast", "QQ 号必须是纯数字", true);
+  if (!/^\d{4,}$/.test(oid)) return toast("oidBindingToast", "OID 必须是至少 4 位的纯数字", true);
+  try {
+    const result = await api("oid-bindings/set", "POST", { user_id: userId, oid });
+    if (result.added) {
+      toast("oidBindingToast", "已添加绑定");
+    } else if (result.updated) {
+      toast("oidBindingToast", `已更新绑定（原 OID：${result.previous_oid}）`);
+    } else {
+      toast("oidBindingToast", "该 QQ 已绑定此 OID");
+    }
+    $("oidBindingUserId").value = "";
+    $("oidBindingOid").value = "";
+    renderOidBindings(result.bindings || []);
+  } catch (e) {
+    toast("oidBindingToast", "保存失败：" + e, true);
+  }
+});
 /* ---------- 高召回模式（按当前群） ---------- */
 function renderHrStatus(g) {
   const on = !!g.high_recall_active;

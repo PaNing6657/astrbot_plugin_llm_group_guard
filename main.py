@@ -27,6 +27,7 @@ from .core.high_recall import (
 )
 from .core.join_tracker import JoinTracker
 from .core.leave_tracker import LeaveTracker
+from .core.oid_binding import OidBindingStore
 from .core.permission_utils import check_group_and_permission
 from .core.whole_ban_scheduler import (
     ScheduleConflictError,
@@ -284,7 +285,12 @@ class LLMGroupGuardPlugin(Star):
         self.scheduler = WholeBanScheduler(self.data_dir, logger)
         # LLM 审查器：直接复用 AstrBot 的 LLM provider，消息守卫按群取配置
         self.reviewer = LLMReviewer(config, context)
-        self.guard = MessageGuard(config, self.reviewer, data_dir=str(self.data_dir), gconf_provider=self._gconf)
+        # QQ-OID 绑定全局持久化；所有成员禁言入口共用同一同步逻辑
+        self.oid_bindings = OidBindingStore(self.data_dir, logger)
+        self.guard = MessageGuard(
+            config, self.reviewer, data_dir=str(self.data_dir), gconf_provider=self._gconf,
+            oid_ban_callback=self._ban_oid_peers,
+        )
         # 退群记录：成员退群时间（供「退群后 X 时间内再次申请自动拒绝」使用）
         self.leave_tracker = LeaveTracker(self.data_dir, logger)
         # 进群记录：每一次自动同意/拒绝入群操作（供 WebUI「进群记录」列表展示）
@@ -346,6 +352,9 @@ class LLMGroupGuardPlugin(Star):
         self.context.register_web_api(f"{base}/rejoin-records/clear", self.web_rejoin_record_clear, ["POST"], "清空某群退群记录")
         self.context.register_web_api(f"{base}/join-records", self.web_join_records, ["GET"], "进群同意/拒绝操作记录")
         self.context.register_web_api(f"{base}/join-records/clear", self.web_join_record_clear, ["POST"], "清空某群进群记录")
+        self.context.register_web_api(f"{base}/oid-bindings", self.web_oid_bindings, ["GET"], "QQ 号与 OID 绑定列表")
+        self.context.register_web_api(f"{base}/oid-bindings/set", self.web_oid_binding_set, ["POST"], "新增或更新 QQ 号与 OID 绑定")
+        self.context.register_web_api(f"{base}/oid-bindings/delete", self.web_oid_binding_delete, ["POST"], "删除 QQ 号与 OID 绑定")
 
     async def web_get_config(self):
         # GET /config?group_id=X：返回全局配置 + 该群配置
@@ -743,7 +752,10 @@ class LLMGroupGuardPlugin(Star):
 
     async def web_local_data(self):
         """GET /{base}/local-data：返回本地持久化的群数据概览。"""
-        return json_response({"groups": self._local_data_index()})
+        return json_response({
+            "groups": self._local_data_index(),
+            "oid_bindings_count": len(self.oid_bindings.bindings),
+        })
 
     async def web_local_data_delete(self):
         """POST /{base}/local-data/delete：删除指定群的全部本地数据（配置/任务/计数/日志）。"""
@@ -757,18 +769,27 @@ class LLMGroupGuardPlugin(Star):
             logger.error(f"[Guard] 删除群 {gid} 本地数据失败: {e}")
             return error_response(f"删除失败：{e}")
         logger.info(f"[Guard] 已删除群 {gid} 的全部本地数据")
-        return json_response({"deleted": True, "groups": self._local_data_index()})
+        return json_response({
+            "deleted": True,
+            "groups": self._local_data_index(),
+            "oid_bindings_count": len(self.oid_bindings.bindings),
+        })
 
     async def web_local_data_clear(self):
         """POST /{base}/local-data/clear：清空全部本地持久化数据。"""
         try:
             for gid in list(self._local_data_index().keys()):
                 self._purge_group_data(gid)
+            bindings_cleared = self.oid_bindings.clear()
         except Exception as e:
             logger.error(f"[Guard] 清空本地数据失败: {e}")
             return error_response(f"清空失败：{e}")
-        logger.info("[Guard] 已清空全部本地持久化数据")
-        return json_response({"cleared": True, "groups": self._local_data_index()})
+        logger.info(f"[Guard] 已清空全部本地持久化数据（OID 绑定 {bindings_cleared} 条）")
+        return json_response({
+            "cleared": True,
+            "groups": self._local_data_index(),
+            "oid_bindings_count": len(self.oid_bindings.bindings),
+        })
 
     # ------------------------------------------------------------------
     # WebUI：退群记录（退群后 X 时间内再次申请拦截）
@@ -848,6 +869,50 @@ class LLMGroupGuardPlugin(Star):
         cleared = self.join_tracker.clear(gid)
         logger.info(f"[Guard] 已清空群 {gid} 的进群记录（{cleared}）")
         return json_response({"cleared": cleared})
+
+    # ------------------------------------------------------------------
+    # WebUI：全局 QQ-OID 绑定
+    # ------------------------------------------------------------------
+    async def web_oid_bindings(self):
+        """GET /{base}/oid-bindings：返回全局 QQ-OID 绑定列表。"""
+        return json_response({"bindings": self.oid_bindings.list_bindings()})
+
+    async def web_oid_binding_set(self):
+        """POST /{base}/oid-bindings/set：新增或更新一条全局绑定。"""
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象")
+        try:
+            user_id = self.oid_bindings.normalize_user_id(payload.get("user_id"))
+            oid = self.oid_bindings.normalize_oid(payload.get("oid"))
+            previous_oid = self.oid_bindings.bind(user_id, oid)
+        except ValueError as e:
+            return error_response(str(e))
+        except Exception as e:
+            logger.error(f"[Guard] 保存 QQ-OID 绑定失败: {e}")
+            return error_response(f"保存失败：{e}")
+        return json_response({
+            "bindings": self.oid_bindings.list_bindings(),
+            "previous_oid": previous_oid,
+            "added": previous_oid is None,
+            "updated": previous_oid is not None and previous_oid != oid,
+            "unchanged": previous_oid == oid,
+        })
+
+    async def web_oid_binding_delete(self):
+        """POST /{base}/oid-bindings/delete：按 QQ 号删除一条全局绑定。"""
+        payload = await request.json(default={})
+        if not isinstance(payload, dict):
+            return error_response("请求体必须是 JSON 对象")
+        try:
+            user_id = self.oid_bindings.normalize_user_id(payload.get("user_id"))
+            deleted = self.oid_bindings.unbind(user_id)
+        except ValueError as e:
+            return error_response(str(e))
+        except Exception as e:
+            logger.error(f"[Guard] 删除 QQ-OID 绑定失败: {e}")
+            return error_response(f"删除失败：{e}")
+        return json_response({"deleted": deleted, "bindings": self.oid_bindings.list_bindings()})
 
     # ------------------------------------------------------------------
     # WebUI：群名片锁定规则管理
@@ -1909,6 +1974,18 @@ class LLMGroupGuardPlugin(Star):
             # 常见于已被人工先一步审批：记录为失败，但不中断（仍发欢迎词并改名片）
             ok = False
             logger.warning(f"[Guard] 同意入群失败（可能已被人工审批）: 群 {group_id} 用户 {user_id}: {e}")
+        if oid:
+            try:
+                previous_oid = self.oid_bindings.bind(user_id, oid)
+                if previous_oid is None:
+                    logger.info(f"[Guard] 入群验证通过，已自动绑定 QQ {user_id} -> OID {oid}")
+                elif previous_oid != oid:
+                    logger.info(
+                        f"[Guard] 入群验证通过，已更新 QQ {user_id} 的 OID 绑定："
+                        f"{previous_oid} -> {oid}"
+                    )
+            except Exception as e:
+                logger.error(f"[Guard] 入群通过但自动保存 QQ-OID 绑定失败: 群 {group_id} 用户 {user_id}: {e}")
         self.join_tracker.record(
             group_id, user_id, "approve",
             nickname=nickname, reason=reason, source="llm", ok=ok, comment=comment,
@@ -2210,6 +2287,76 @@ class LLMGroupGuardPlugin(Star):
             logger.error(f"@禁言指令执行异常: {e}")
             return False
 
+    async def _ban_oid_peers(self, bot, group_id, user_id, duration, self_id=None) -> int:
+        """仅在当前群内同步禁言同 OID 的绑定账号；不处理解禁，也不跨群查找。"""
+        try:
+            duration = int(duration)
+            primary_uid = self.oid_bindings.normalize_user_id(user_id)
+            group_id_int = int(group_id)
+        except (TypeError, ValueError):
+            return 0
+        if duration <= 0:
+            return 0
+        oid = self.oid_bindings.get_oid(primary_uid)
+        if not oid:
+            return 0
+        try:
+            bot_uid = self.oid_bindings.normalize_user_id(self_id) if self_id else ""
+        except (TypeError, ValueError):
+            bot_uid = ""
+
+        peer_ids = [
+            uid for uid in self.oid_bindings.users_for_oid(oid)
+            if uid != primary_uid and uid != bot_uid
+        ]
+        if not peer_ids:
+            return 0
+
+        async def _ban_peer(peer_uid: str) -> bool:
+            # 查询成员信息以确认账号属于当前群，并且不越过群主/管理员保护。
+            try:
+                info = await bot.get_group_member_info(
+                    group_id=group_id_int, user_id=int(peer_uid)
+                )
+            except Exception as e:
+                logger.debug(
+                    f"[Guard] 跳过同 OID 账号 {peer_uid}：无法确认其在群 {group_id} 中的成员身份: {e}"
+                )
+                return False
+            if not isinstance(info, dict):
+                return False
+            actual_uid = str(info.get("user_id") or peer_uid).strip()
+            if actual_uid != peer_uid:
+                return False
+            role = str(info.get("role") or "member").strip().lower()
+            if role in ("owner", "admin"):
+                logger.info(
+                    f"[Guard] 跳过同 OID 账号 {peer_uid}：群 {group_id} 中为{('群主' if role == 'owner' else '群管理员')}"
+                )
+                return False
+            try:
+                await bot.api.call_action(
+                    "set_group_ban",
+                    group_id=group_id_int,
+                    user_id=int(peer_uid),
+                    duration=duration,
+                )
+            except Exception as e:
+                logger.warning(
+                    f"[Guard] 同 OID 账号禁言失败：群 {group_id} 用户 {peer_uid}，时长 {duration} 秒: {e}"
+                )
+                return False
+            logger.info(
+                f"[Guard] 已同步禁言群 {group_id} 中同 OID 账号 {peer_uid}（OID={oid}），时长 {duration} 秒"
+            )
+            return True
+
+        results = await asyncio.gather(*(_ban_peer(uid) for uid in peer_ids), return_exceptions=True)
+        for uid, result in zip(peer_ids, results):
+            if isinstance(result, Exception):
+                logger.warning(f"[Guard] 同 OID 账号 {uid} 禁言任务异常: {result}")
+        return sum(result is True for result in results)
+
     async def _exec_member_ban(self, event, group_id, target_qq, target_name, seconds, unban, notify: bool = True) -> bool:
         """执行对单个成员的禁言/解禁；notify=False 时静默执行（不向群里发提示）。"""
         if target_qq == str(event.get_self_id()):
@@ -2239,9 +2386,23 @@ class LLMGroupGuardPlugin(Star):
                 user_id=int(target_qq),
                 duration=0 if unban else seconds,
             )
+            linked_count = 0
+            if not unban:
+                try:
+                    self_id = event.get_self_id()
+                except Exception:
+                    self_id = ""
+                try:
+                    linked_count = await self._ban_oid_peers(
+                        event.bot, group_id, target_qq, seconds, self_id=self_id
+                    )
+                except Exception as e:
+                    logger.warning(f"[Guard] 同 OID 账号禁言同步失败: {e}")
             label = target_name or target_qq
             tip = f"已解除成员 {label}({target_qq}) 的禁言" if unban else \
                   f"已禁言成员 {label}({target_qq}) {seconds} 秒"
+            if linked_count:
+                tip += f"（已同步禁言同 OID 账号 {linked_count} 个）"
             logger.info(f"群 {group_id} {tip}，操作者：{event.get_sender_name()}")
             if notify:
                 await event.bot.send_group_msg(group_id=int(group_id), message=tip)
