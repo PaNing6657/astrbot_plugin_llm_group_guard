@@ -60,7 +60,7 @@
       <!-- D1 决策模型：全局设置，所有群共用 -->
       <div class="card" id="d1Card">
         <h3 style="font-size:15px">D1 决策模型（全局）</h3>
-        <p class="hint">审核主/备用模型选择「D1 决策模型（LiquidAI）」时使用：通过 OpenRouter 的 System One 接口做「是否违规」概率判定，不生成文字，速度快、成本低（仅按输入 token 计费）。判定说明取本群的「审核要求」，留空时使用内置默认问题；API Key 为全局配置，所有群共用。</p>
+        <p class="hint">审核主/备用模型选择「D1 决策模型（LiquidAI）」时使用：通过 System One 接口做「是否违规 / 严重程度」判定，不生成文字，速度快、成本低（仅按输入 token 计费）。<b>判定标准完全来自你填写的内容</b>：本群「审核要求」必填（留空则跳过审核），按严重程度判定 / 处置时还需在下方填写「严重度档位」；插件不内置任何判定话术。API Key 为全局配置，所有群共用。</p>
         <div class="form-grid wide" id="d1Form"></div>
       </div>
       <div class="actions">
@@ -233,8 +233,8 @@
 
         <div class="field" style="margin-top: 16px;">
           <label>入群审核要求（自定义）</label>
-          <textarea id="joinPrompt" placeholder="留空=使用内置默认要求：申请信息必须同时包含【昵称】和【OID】（纯数字编号）"></textarea>
-          <p class="hint">完全自定义本次入群审批的判定要求（无内置话术），例如：必须包含真实姓名与学号，且备注中不得含广告或二维码；留空则使用内置默认要求（昵称+OID）。填写后判定完全由模型按你的要求给出，不再强制要求昵称与 OID</p>
+          <textarea id="joinPrompt" placeholder="必填：写清本群入群要求，例如必须包含真实姓名与学号、备注不得含广告或二维码；留空则不自动审批"></textarea>
+          <p class="hint">完全自定义入群审批的判定要求（无内置话术、无兜底），例如：必须包含真实姓名与学号，且备注中不得含广告或二维码。<b>必填</b>——留空则不进行自动审批，申请交由管理员手动处理；判定完全按你填写的要求给出</p>
         </div>
 
         <div class="toggle-row" style="margin: 16px 0 14px;">

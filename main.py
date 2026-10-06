@@ -57,8 +57,10 @@ DEFAULT_GLOBAL_CONFIG = {
         "threshold": 0.7,  # 违规概率 ≥ 阈值判违规；≤ 1-阈值判合规
         "timeout": 30,
         "uncertain_as_violation": False,  # 概率落在不确定区间时是否按违规处理
-        "judge_mode": "noul",  # noul=按违规概率判断 / score=按严重度判断（0~3 分）
+        "judge_mode": "noul",  # noul=按违规概率判断 / score=按严重度判断
+        "severity_levels": [],  # 严重度档位（完全由用户填写，无内置；每项一档，从轻到重）
         "score_threshold": 1.5,  # judge_mode=score 时：严重度 ≥ 该值判违规
+        "retry_delay": 2,  # 遇到 429（免费档限流）等待该秒数后重试一次；0=不重试
     },
 }
 
@@ -82,7 +84,7 @@ DEFAULT_GROUP_CONFIG = {
     "guard_merge_window": 10,  # 合窗秒数：每次收到新消息重置倒计时，静默满该秒数后送审
     "guard_merge_max": 50,  # 单批条数上限：达到上限立即送审（0=不限制），防超长刷屏拖延审核
     "guard_risk_as_violation": True,
-    "guard_prompt": "",
+    "guard_prompt": "",  # 审核要求（必填）：留空则不进行 LLM 审核（不内置任何默认标准）
     "guard_notice": "",  # 违规通知，支持 {at_user} {nickname} {user_id} {duration} {count} {messages}，留空不发送
     "keyword_guard_enable": False,
     # 关键词检测完全独立于 LLM 审核：轻/重两级各自拥有处置方式与阶梯禁言设置
@@ -106,7 +108,7 @@ DEFAULT_GROUP_CONFIG = {
     "join_llm_chat": "",  # 入群审批专用主模型
     "join_llm_chat_fallback": "",  # 入群审批专用备用模型
     "join_llm_ocr_chat": "",  # 入群审批专用识图模型（审核信息含图片时使用）
-    # 入群审批要求完全自定义：留空仅用内置默认要求（需同时含昵称与 OID）
+    # 入群审批要求完全自定义（必填）：留空则跳过自动审批，交由管理员手动处理
     "join_prompt": "",
     # 退群记录：退群后 X 时间内再次申请直接拒绝（防退群后立刻重进）
     "join_rejoin_block_enable": False,
@@ -520,7 +522,19 @@ class LLMGroupGuardPlugin(Star):
         d1["uncertain_as_violation"] = bool(d1.get("uncertain_as_violation"))
         judge_mode = str(d1.get("judge_mode") or "noul").strip().lower()
         d1["judge_mode"] = judge_mode if judge_mode in ("noul", "score") else "noul"
-        d1["score_threshold"] = round(_num("score_threshold", 0.1, 2.9), 2)
+        # 严重度档位完全由用户填写（无内置）：支持数组或每行一档的文本
+        raw_levels = d1.get("severity_levels")
+        if isinstance(raw_levels, str):
+            parts = raw_levels.replace("，", "\n").replace(",", "\n").splitlines()
+        elif isinstance(raw_levels, (list, tuple)):
+            parts = [str(x) for x in raw_levels]
+        else:
+            parts = []
+        levels = [str(p).strip() for p in parts if str(p).strip()][:10]
+        d1["severity_levels"] = levels
+        max_score = (len(levels) - 1) if len(levels) >= 2 else 0
+        d1["score_threshold"] = round(_num("score_threshold", 0.1, max(max_score - 0.05, 0.1)), 2)
+        d1["retry_delay"] = round(_num("retry_delay", 0, 10), 1)
         global_conf["d1"] = d1
 
     @staticmethod

@@ -12,7 +12,9 @@ const D1_DEFAULTS = {
   timeout: 30,
   uncertain_as_violation: false,
   judge_mode: "noul",
+  severity_levels: [],
   score_threshold: 1.5,
+  retry_delay: 2,
 };
 
 /* ---------- 本群字段定义 ---------- */
@@ -23,7 +25,7 @@ const GROUP_FIELDS = [
   { key: "guard_enable", label: "群消息违规审核", type: "toggle", hint: "关闭后 LLM 审核不生效" },
   { key: "guard_action", label: "违规处置方式", type: "select", options: ["ban", "recall", "recall_and_ban"], hint: "ban=禁言 recall=撤回 recall_and_ban=撤回并禁言" },
   { key: "guard_severity_action_enable", label: "按严重程度决定处置", type: "toggle", hint: "D1 判定违规时按严重度自动选择：达到下方阈值→撤回并禁言；未达到→仅撤回（仅对 D1 决策模型生效，其他聊天模型仍用上方处置方式）" },
-  { key: "guard_severity_ban_score", label: "撤回并禁言的严重度阈值", type: "number", hint: "严重度 ≥ 该值→撤回并禁言；低于→仅撤回。严重度 0~3（正常0/轻微1/明显2/严重3），建议 2.5；「仅撤回」仍受「撤回 N 次自动禁言」约束，设为 0 可关闭该升级" },
+  { key: "guard_severity_ban_score", label: "撤回并禁言的严重度阈值", type: "number", hint: "严重度 ≥ 该值→撤回并禁言；低于→仅撤回。数值按你在 D1 卡片填写的严重度档位序号（第 1 档=0 分；4 档制建议 2.5）；「仅撤回」仍受「撤回 N 次自动禁言」约束，设为 0 可关闭该升级" },
   { key: "guard_ban_seconds", label: "基础禁言时长（秒）", type: "text", hint: "阶梯第一档，支持 30-120 随机范围" },
   { key: "guard_stair_enable", label: "阶梯禁言", type: "toggle", hint: "违规次数越多禁言越久" },
   { key: "guard_stair_multiplier", label: "阶梯倍数", type: "number" },
@@ -34,7 +36,7 @@ const GROUP_FIELDS = [
   { key: "guard_merge_window", label: "合并窗口（秒）", type: "number", hint: "默认 10：A 发出后开始倒计时，窗口内又发 B 则倒计时重置，直到静默满该秒数才把 A、B… 合并审核" },
   { key: "guard_merge_max", label: "单批最多条数", type: "number", hint: "达到该条数立即送审，避免超长刷屏把审核一直往后拖；0=不限制" },
   { key: "guard_risk_as_violation", label: "风控拦截视为违规", type: "toggle" },
-  { key: "guard_prompt", label: "审核要求（自定义·群消息）", type: "textarea", full: true, hint: "完全自定义群消息审核提示词（无内置话术），写清本群禁止内容；留空则仅保留 JSON 输出约束。入群审批审核要求见「入群审批」页的独立自定义项" },
+  { key: "guard_prompt", label: "审核要求（自定义·群消息·必填）", type: "textarea", full: true, hint: "完全自定义群消息审核提示词（无内置话术、无兜底）：写清本群禁止与允许的内容；留空则不进行 LLM 审核（消息不会被判定）。入群审批审核要求见「入群审批」页的独立自定义项" },
   { key: "guard_notice", label: "违规通知消息", type: "text", full: true, hint: "支持 {at_user}(@该违规成员，与入群欢迎同一套 @ 逻辑) {nickname} {user_id} {duration} {count} {messages}，留空不发送；手写 @{user_id} 会自动升级为真 @（不再只是纯文本 QQ 号）" },
   { key: "keyword_guard_enable", label: "关键词检测", type: "toggle", hint: "轻/重两级违规词各自独立处置与阶梯禁言，与 LLM 审核互不影响" },
   { key: "keyword_minor_list", label: "轻度违规词（逗号分隔）", type: "csv", full: true, hint: "命中轻度词按下方轻度处置执行" },
@@ -425,7 +427,9 @@ const D1_FIELDS = [
   { key: "model", label: "模型 ID", type: "text", hint: "OpenRouter 用 liquid/d1；Liquid 官方用 d1 或 d1:free" },
   { key: "threshold", label: "违规概率阈值（0.05-0.99）", type: "number", hint: "按概率判断时：违规概率 ≥ 阈值判违规；≤ 1-阈值判合规" },
   { key: "judge_mode", label: "判定依据", type: "select", options: [["noul", "违规概率（Noul）"], ["score", "严重程度（Score）"]], hint: "选「严重程度」时按严重度分数判违规（D1 会同时返回违规概率与严重度）" },
-  { key: "score_threshold", label: "严重度违规阈值（0.1-2.9）", type: "number", hint: "仅「判定依据=严重程度」时生效：严重度 ≥ 该值判违规（0~3 分，建议 1.5）" },
+  { key: "severity_levels", label: "严重度档位（每行一档·必填）", type: "textarea", full: true, hint: "完全由你定义，从轻到重每行一档（第 1 行=0 分，最多 10 档）；仅在使用「严重程度」判定或「按严重程度决定处置」时需要，未填写时跳过 D1 审核（插件不内置任何档位）" },
+  { key: "score_threshold", label: "严重度违规阈值", type: "number", hint: "仅「判定依据=严重程度」时生效：严重度 ≥ 该值判违规（分值=档位序号；4 档制建议 1.5）" },
+  { key: "retry_delay", label: "限流重试等待（秒）", type: "number", hint: "遇到 429（官方免费档 d1:free 常触发）时等待该秒数后自动重试一次；0=不重试（直接切备用模型）" },
   { key: "timeout", label: "请求超时（秒）", type: "number" },
   { key: "uncertain_as_violation", label: "不确定区间按违规处理", type: "toggle", hint: "概率落在（1-阈值, 阈值）之间时是否按违规处置" },
 ];
@@ -444,6 +448,11 @@ function renderD1Form() {
         (f.hint ? `<div class="t-hint">${f.hint}</div>` : "") + `</div>` +
         `<div class="toggle ${val ? "on" : ""}" data-key="${f.key}"></div></div>`;
       el.querySelector(".toggle").addEventListener("click", (e) => e.currentTarget.classList.toggle("on"));
+    } else if (f.type === "textarea") {
+      const v = Array.isArray(val) ? val.join("\n") : (val ?? "");
+      el.innerHTML =
+        `<label>${f.label}</label><textarea data-key="${f.key}" rows="4">${escapeHtml(v)}</textarea>` +
+        (f.hint ? `<div class="hint">${f.hint}</div>` : "");
     } else if (f.type === "select") {
       el.innerHTML =
         `<label>${f.label}</label><select data-key="${f.key}">` +

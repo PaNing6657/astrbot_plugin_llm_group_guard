@@ -48,13 +48,6 @@ _JOIN_JSON_RULE = (
     '"comment": "简短中文说明信息是否完整或缺失了什么"}'
 )
 
-# 内置默认入群要求：join_prompt 留空时使用（非空时完全由用户自定义要求替换）
-_DEFAULT_JOIN_PROMPT = (
-    "你是入群申请审核助手。请检查申请人填写的入群验证信息："
-    "它必须同时包含【昵称】和【OID】（也称 UID，是一串纯数字编号，如 QQ 号、学号等，不含字母）。"
-    "信息模糊、可读性差或格式不符合要求时倾向保守判断。"
-)
-
 _RISK_KEYWORDS = (
     "high risk",
     "rejected",
@@ -76,14 +69,6 @@ _MAX_BATCH_CHARS = 8000  # 合并审核时整批消息正文的长度上限
 D1_CHAT_ID = "d1"
 _D1_DEFAULT_ENDPOINT = "https://openrouter.ai/api/v1/systemone"
 _D1_DEFAULT_MODEL = "liquid/d1"
-_D1_DEFAULT_QUESTION = "这条消息是否违反群规（广告、辱骂、色情、违法等）？"
-# 严重度（Score）等级：索引 0~3 即 0~3 分，用于「按严重程度判断」与分级处置
-_D1_SEVERITY_LEVELS = [
-    "正常：没有违规",
-    "轻微：边缘或轻微不当，提醒即可",
-    "明显：明确违反群规（广告、辱骂、刷屏等）",
-    "严重：恶劣或高风险内容（涉政涉黄、诈骗、恶意攻击等）",
-]
 
 
 def is_d1_model(chat_id: str) -> bool:
@@ -148,6 +133,17 @@ class LLMReviewer:
     # ------------------------------------------------------------------
     # D1 决策模型（LiquidAI System One 接口）：概率判定，不生成文字
     # ------------------------------------------------------------------
+    @staticmethod
+    def _d1_levels(value) -> list:
+        """严重度档位：支持数组或每行一档的文本；完全由用户填写，无内置档位。"""
+        if isinstance(value, str):
+            parts = re.split(r"[\n,，]", value)
+        elif isinstance(value, (list, tuple)):
+            parts = [str(x) for x in value]
+        else:
+            parts = []
+        return [str(p).strip() for p in parts if str(p).strip()][:10]
+
     def _d1_settings(self) -> dict:
         """读取全局 D1 配置（实时读取，WebUI 保存后立即生效）。"""
         try:
@@ -167,7 +163,8 @@ class LLMReviewer:
         judge_mode = str(raw.get("judge_mode") or "noul").strip().lower()
         if judge_mode not in ("noul", "score"):
             judge_mode = "noul"
-        max_score = float(len(_D1_SEVERITY_LEVELS) - 1)
+        levels = self._d1_levels(raw.get("severity_levels"))
+        max_score = float(len(levels) - 1) if len(levels) >= 2 else 0.0
         return {
             "api_key": str(raw.get("api_key") or "").strip(),
             "endpoint": str(raw.get("endpoint") or _D1_DEFAULT_ENDPOINT).strip(),
@@ -176,7 +173,10 @@ class LLMReviewer:
             "timeout": _num("timeout", 30.0, 5.0, 120.0),
             "uncertain_as_violation": bool(raw.get("uncertain_as_violation")),
             "judge_mode": judge_mode,
+            "severity_levels": levels,
             "score_threshold": _num("score_threshold", 1.5, 0.1, max(max_score - 0.05, 0.1)),
+            # 免费档/高峰期限流（429）时等待该秒数后重试一次；0=不重试
+            "retry_delay": _num("retry_delay", 2.0, 0.0, 10.0),
         }
 
     @staticmethod
@@ -185,7 +185,7 @@ class LLMReviewer:
         text = str(system or "")
         for rule in (_JSON_RULE, _JOIN_JSON_RULE):
             text = text.replace(rule, "")
-        return text.strip() or _D1_DEFAULT_QUESTION
+        return text.strip()  # 无内置兜底：审核要求为空时由调用方跳过审核
 
     @staticmethod
     async def _http_post_json(url: str, api_key: str, payload: dict, timeout: float):
@@ -232,6 +232,8 @@ class LLMReviewer:
     ) -> Optional[dict]:
         """D1 判定：消息作为 state、审核要求作为判断题，按概率或严重度给结论。
 
+        判定标准完全来自用户配置（审核要求 + 严重度档位），没有任何内置兜底：
+        未填写审核要求、或需要严重度但未填写档位时，直接跳过本次审核。
         按需提问：每个问题都会把 state 重新计一遍输入 token，所以只问这次真正要用的。
         - 判定依据=概率 且 该群未开启「按严重程度决定处置」→ 只问违规概率（Noul）
         - 判定依据=概率 且 开启了严重度处置 → 违规概率 + 严重度（Noul + Score）
@@ -242,20 +244,43 @@ class LLMReviewer:
             self.last_error = "未配置 D1 API Key（WebUI 配置页 → D1 决策模型）"
             self.last_error_type = "request_fail"
             return None
+        instruction = str(instruction or "").strip()
+        if not instruction:
+            self.last_error = "未填写审核要求（guard_prompt / 高召回审核要求），已跳过 D1 审核"
+            self.last_error_type = "config_missing"
+            logger.warning(f"[LLMReviewer] {self.last_error}")
+            return None
+        levels = cfg["severity_levels"]
+        need_score = cfg["judge_mode"] == "score" or need_severity
+        if need_score and len(levels) < 2:
+            self.last_error = "未填写 D1 严重度档位（至少 2 档），已跳过审核"
+            self.last_error_type = "config_missing"
+            logger.warning(f"[LLMReviewer] {self.last_error}")
+            return None
         questions: dict = {}
         if cfg["judge_mode"] != "score":
             questions["violate"] = {"type": "noul", "instructions": instruction}
-        if cfg["judge_mode"] == "score" or need_severity:
+        if need_score:
+            # 每个问题独立评估：严重度问题同样要带上用户填写的判定要求，不能依赖另一个问题
             questions["severity"] = {
                 "type": "score",
-                "instructions": "这段内容的违规严重程度如何？",
-                "criteria": _D1_SEVERITY_LEVELS,
+                "instructions": f"判定要求：\n{instruction}\n\n这段内容违反上述要求的严重程度如何？",
+                "criteria": levels,
             }
         payload = {"model": cfg["model"], "state": user, "questions": questions}
         try:
             status, data = await self._http_post_json(
                 cfg["endpoint"], cfg["api_key"], payload, cfg["timeout"]
             )
+            if status == 429 and cfg["retry_delay"] > 0:
+                # 限流（免费档常见）：等待片刻重试一次，避免直接判失败切备用模型
+                logger.warning(
+                    f"[LLMReviewer] D1 触发限流（429），{cfg['retry_delay']:.1f}s 后重试一次"
+                )
+                await asyncio.sleep(cfg["retry_delay"])
+                status, data = await self._http_post_json(
+                    cfg["endpoint"], cfg["api_key"], payload, cfg["timeout"]
+                )
         except Exception as e:
             self.last_error = f"D1 请求失败: {e}"
             self.last_error_type = "request_fail"
@@ -301,7 +326,7 @@ class LLMReviewer:
         else:
             violated = severity >= score_threshold
 
-        max_score = len(_D1_SEVERITY_LEVELS) - 1
+        max_score = len(levels) - 1
         detail = []
         if severity is not None:
             detail.append(f"严重度 {severity:.2f}/{max_score}")
@@ -433,9 +458,9 @@ class LLMReviewer:
         if result is not None:
             return result
 
-        # 备用模型阶段：仅技术性失败切换；风控拦截不切
+        # 备用模型阶段：仅技术性失败切换；风控拦截与配置缺失（config_missing）不切
         fb = (fallback_chat_id or "").strip()
-        if fb and fb != chat_id and self.last_error_type != "risk_block":
+        if fb and fb != chat_id and self.last_error_type not in ("risk_block", "config_missing"):
             prior = self.last_error
             if image_urls and not self.model_supports_image(fb):
                 # 兜底模型也不识图：识图审核模型直接带图审核
@@ -538,7 +563,7 @@ class LLMReviewer:
         """判定一批（同一成员短时间内连续发送的）群消息是否违规。
 
         prompt 为该群自定义审核要求（guard_prompt，由调用方传入），完全由用户定义、
-        无内置默认话术；未填写时系统提示仅保留 JSON 输出格式约束。
+        无内置默认话术；未填写时直接跳过审核（不使用任何内置判定标准）。
         chat_id 为该群选用的 AstrBot 聊天模型，fallback_chat_id 为备用模型；
         image_urls 为这批消息中的图片（与文本一起送审，识图模型直接看图判定），
         ocr_chat_id 为识图审核模型（审核模型不识图时由它直接带图出判定）。
@@ -547,8 +572,13 @@ class LLMReviewer:
         其余失败返回 None。
         """
         wanted = str(prompt or "").strip()
-        # 不内置任何默认提示词：自定义要求非空时拼在格式约束前，为空则仅输出格式约束
-        system = f"{wanted}\n{_JSON_RULE}" if wanted else _JSON_RULE
+        # 不内置任何默认审核标准：未填写审核要求时直接跳过，避免用模型自带标准判定
+        if not wanted:
+            self.last_error = "未填写审核要求（guard_prompt / 高召回审核要求），已跳过 LLM 审核"
+            self.last_error_type = "config_missing"
+            logger.warning(f"[LLMReviewer] {self.last_error}")
+            return None
+        system = f"{wanted}\n{_JSON_RULE}"
         user = self._format_batch(sender, texts)
         image_urls = list(image_urls or [])
         if image_urls and self._vision_available(chat_id, ocr_chat_id):
@@ -589,9 +619,8 @@ class LLMReviewer:
     ) -> Optional[dict]:
         """判定入群申请信息是否满足入群要求，返回结构化结果。
 
-        prompt 为该群自定义入群审核要求（join_prompt，由调用方传入），完全由用户定义；
-        填写后判定完全跟随模型的 allowed 结论；留空时使用内置默认要求（必须同时包含
-        昵称与 OID/UID，缺任一即不通过）。
+        prompt 为该群自定义入群审核要求（join_prompt，由调用方传入），完全由用户定义、
+        无内置默认要求；留空时直接跳过自动审批（交由管理员手动处理）。
         chat_id/fallback_chat_id 为入群审批专用模型（未配置时调用方会回退到消息审核模型），
         ocr_chat_id 为识图模型（申请信息含图片时可带图审核）。
         返回字段：allowed（是否满足要求）、has_nickname、has_oid、nickname、oid、reason
@@ -619,35 +648,31 @@ class LLMReviewer:
                 self.last_error_type = "request_fail"
                 return None
         wanted = str(prompt or "").strip()
-        # 自定义要求非空则完全替换内置要求；为空时使用内置默认要求
-        requirement = wanted or _DEFAULT_JOIN_PROMPT
-        is_custom = bool(wanted)
-        system = f"{requirement}\n{_JOIN_JSON_RULE}"
+        # 不内置任何默认入群审批标准：未填写要求时跳过自动审批，交由管理员手动处理
+        if not wanted:
+            self.last_error = "未填写入群审批要求（join_prompt），已跳过自动审批"
+            self.last_error_type = "config_missing"
+            logger.warning(f"[LLMReviewer] {self.last_error}")
+            return None
+        system = f"{wanted}\n{_JOIN_JSON_RULE}"
         user = f"入群验证信息内容：\n{comment[:500]}"
         result = await self._ask(chat_id, fallback_chat_id, system, user, ocr_chat_id=ocr_chat_id)
         if result is None:
             return None
+        raw_allowed = result.get("allowed")
+        if raw_allowed is None:
+            # 模型未给出结论：不代判、不回退，交由管理员手动处理
+            self.last_error = "入群审核模型未返回 allowed 结论，已跳过自动审批"
+            self.last_error_type = "parse_fail"
+            return None
+        allowed = bool(raw_allowed)
         has_nickname = bool(result.get("has_nickname"))
         has_oid = bool(result.get("has_oid"))
         oid = str(result.get("oid") or "").strip()
-        # OID 必须是纯数字；缺失或非数字均视为无效（内置默认要求以此为判定依据）
-        oid_valid = has_oid and oid.isdigit() and len(oid) >= 4
-        info_ok = has_nickname and oid_valid
-        raw_allowed = result.get("allowed")
-        if is_custom:
-            # 完全自定义要求：以模型的 allowed 为准，仅在其未给出该字段时按默认规则回退判断
-            allowed = info_ok if raw_allowed is None else bool(raw_allowed)
-        else:
-            # 内置默认要求：除模型判定外仍硬性校验昵称与 OID，避免误放行
-            allowed = (raw_allowed is not False) and info_ok
         reason = str(result.get("reason") or "").strip()
         if not allowed and not reason:
-            missing = []
-            if not has_nickname:
-                missing.append("昵称")
-            if not oid_valid:
-                missing.append("OID/UID")
-            reason = ("缺少" + "、".join(missing)) if missing else "申请信息不满足入群要求"
+            # 仅拒绝文案占位（避免拒绝消息为空），判定仍以模型结论为准
+            reason = "申请信息不满足入群要求"
         return {
             "allowed": allowed,
             "has_nickname": has_nickname,
