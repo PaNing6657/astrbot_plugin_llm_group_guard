@@ -1575,8 +1575,10 @@ class LLMGroupGuardPlugin(Star):
             return "拦截时长过长（最多 90 天）"
         return None
 
-    async def _set_high_recall(self, group_id, active: bool, manual: bool = False) -> bool:
-        """切换高召回状态并落盘；状态实际变化时发送开关提示（无连接时排队补发）。"""
+    async def _set_high_recall(
+        self, group_id, active: bool, manual: bool = False, send_notice: bool = True
+    ) -> bool:
+        """切换高召回状态并落盘；可由命令调用方用最终结果替代配置通知。"""
         gconf = self._gconf(group_id)
         changed = bool(gconf.get("high_recall_active")) != bool(active)
         gconf["high_recall_active"] = bool(active)
@@ -1590,8 +1592,13 @@ class LLMGroupGuardPlugin(Star):
             self._save_config()
         if changed:
             logger.info(f"[Guard] 群 {group_id} 高召回模式已{'开启' if active else '关闭'}")
-            if not await self._try_send_hr_notice(group_id, bool(active)):
-                self._hr_pending[str(group_id)] = bool(active)
+            if send_notice:
+                if not await self._try_send_hr_notice(group_id, bool(active)):
+                    self._hr_pending[str(group_id)] = bool(active)
+            else:
+                self._hr_pending.pop(str(group_id), None)
+        elif not send_notice:
+            self._hr_pending.pop(str(group_id), None)
         return changed
 
     async def _try_send_hr_notice(self, group_id, active: bool) -> bool:
@@ -2260,7 +2267,7 @@ class LLMGroupGuardPlugin(Star):
     @staticmethod
     def _strip_at_text(raw: str, ats: list[tuple[str, str]]) -> str:
         """去掉消息中的 at 部分，只留命令文本用于匹配。"""
-        text = re.sub(r"\[CQ:at[^\]]*\]", " ", raw)
+        text = re.sub(r"\[CQ:at[^\]]*\]|\[At:\d+\]", " ", raw)
         for _, name in ats:
             if name:
                 text = re.sub(r"\s*@" + re.escape(str(name)) + r"\s*", " ", text)
@@ -2397,7 +2404,7 @@ class LLMGroupGuardPlugin(Star):
             pass
 
         text = str(getattr(event, "message_str", "") or "")
-        text = re.sub(r"^(?:\s*\[CQ:at[^\]]*\]\s*)+", "", text)
+        text = re.sub(r"^(?:(?:\s*\[CQ:at[^\]]*\])|(?:\s*\[At:\d+\]))+\s*", "", text)
         if getattr(event, "is_at_or_wake_command", False) and re.match(
             r"^\s*(?:[/／]\s*)?群管(?=\s|$)", text
         ):
@@ -2407,7 +2414,7 @@ class LLMGroupGuardPlugin(Star):
         if isinstance(raw, dict):
             raw = raw.get("raw_message")
         if isinstance(raw, str):
-            raw = re.sub(r"^\s*(?:\[CQ:at[^\]]*\]\s*)+", "", raw)
+            raw = re.sub(r"^(?:(?:\s*\[CQ:at[^\]]*\])|(?:\s*\[At:\d+\]))+\s*", "", raw)
             return bool(re.match(r"^\s*[/／]\s*群管(?=\s|$)", raw))
         return False
 
@@ -2470,6 +2477,15 @@ class LLMGroupGuardPlugin(Star):
             + json.dumps(payload, ensure_ascii=False)
         )
 
+    async def _group_command_permission_error(self, event, group_id) -> Optional[str]:
+        """Use the same sensitive-operation permission policy as other group tools."""
+        if not self._permission_verification(group_id):
+            return None
+        has_perm, error_msg = await check_group_and_permission(
+            event, self._allow_groupadmin_use(group_id), event.get_sender_name()
+        )
+        return None if has_perm else (error_msg or "权限不足。")
+
     async def _execute_group_command_tool(
         self, event, name: str, arguments: dict, request_text: str, mentions: list
     ) -> dict:
@@ -2485,12 +2501,19 @@ class LLMGroupGuardPlugin(Star):
             },
             "list_group_ban_schedules": set(),
             "cancel_group_ban_schedules": set(),
+            "set_group_high_recall_mode": {"action"},
+            "set_group_llm_audit": {"action"},
         }[name]
         unexpected = set(arguments) - allowed_fields
         if unexpected:
             return {"status": "error", "message": "模型返回了未允许的工具参数，未执行操作。"}
 
         if name == "set_group_member_ban":
+            if len(format_mention_context(mentions)) > 1:
+                return {
+                    "status": "error",
+                    "message": "单人禁言一次只支持一名明确目标，请重新指令并只 @ 一位成员。",
+                }
             raw_target = arguments.get("user_id")
             if isinstance(raw_target, int) and not isinstance(raw_target, bool):
                 target = str(raw_target)
@@ -2560,15 +2583,95 @@ class LLMGroupGuardPlugin(Star):
         if name == "list_group_ban_schedules":
             return await self.list_group_ban_schedules(event)
 
+        if name == "set_group_high_recall_mode":
+            action = arguments.get("action")
+            if action not in ("enable", "disable", "toggle"):
+                return {"status": "error", "message": "无法确认是开启、关闭还是切换高召回模式。"}
+            group_id = event.get_group_id()
+            if not group_id:
+                return {"status": "error", "message": "此操作仅可在群聊中进行。"}
+            permission_error = await self._group_command_permission_error(event, group_id)
+            if permission_error:
+                return {"status": "error", "message": permission_error}
+            current = bool(self._gconf(group_id).get("high_recall_active"))
+            enable = action == "enable" if action != "toggle" else not current
+
+            await self._set_high_recall(
+                str(group_id), enable, manual=True, send_notice=False
+            )
+            gconf = self._gconf(group_id)
+            action = "开启" if enable else "关闭"
+            message = f"已手动{action}本群高召回模式。"
+            manual_until = float(gconf.get("high_recall_manual_until") or 0)
+            if manual_until:
+                until_text = time.strftime("%m-%d %H:%M", time.localtime(manual_until))
+                message += f"手动状态保持到 {until_text}，之后由每日定时规则接管。"
+            elif gconf.get("high_recall_enable"):
+                message += "之后由每日定时规则接管。"
+            else:
+                message += "当前未启用每日定时切换，状态保持到再次手动更改。"
+            if enable and not gconf.get("guard_enable"):
+                message += "注意：本群 LLM 审核当前关闭，高召回暂不会用于消息审核。"
+            return {"status": "success", "message": message}
+
+        if name == "set_group_llm_audit":
+            action = arguments.get("action")
+            if action not in ("enable", "disable", "toggle"):
+                return {"status": "error", "message": "无法确认是开启、关闭还是切换 LLM 审核。"}
+            group_id = event.get_group_id()
+            if not group_id:
+                return {"status": "error", "message": "此操作仅可在群聊中进行。"}
+            permission_error = await self._group_command_permission_error(event, group_id)
+            if permission_error:
+                return {"status": "error", "message": permission_error}
+
+            gconf = self._gconf(group_id)
+            enable = action == "enable" if action != "toggle" else not bool(gconf.get("guard_enable"))
+            gconf["guard_enable"] = enable
+            self._save_config()
+            if not enable:
+                return {
+                    "status": "success",
+                    "message": "已关闭本群 LLM 消息审核；独立的关键词检测不受影响。",
+                }
+
+            review_prompt = (
+                gconf.get("high_recall_prompt") or gconf.get("guard_prompt")
+                if gconf.get("high_recall_active")
+                else gconf.get("guard_prompt")
+            )
+            review_chat = (
+                gconf.get("high_recall_llm_chat") or gconf.get("llm_chat")
+                if gconf.get("high_recall_active")
+                else gconf.get("llm_chat")
+            )
+            warnings = []
+            if not str(review_prompt or "").strip():
+                warnings.append("未填写审核要求，消息不会被 LLM 判定")
+            if not str(review_chat or "").strip():
+                warnings.append("未选择审核主模型，消息不会调用 LLM")
+            elif is_d1_model(review_chat):
+                d1 = ((self.config.get("global") or {}).get("d1") or {})
+                fallback = (
+                    gconf.get("high_recall_llm_chat_fallback") or gconf.get("llm_chat_fallback")
+                    if gconf.get("high_recall_active")
+                    else gconf.get("llm_chat_fallback")
+                )
+                if not str(d1.get("api_key") or "").strip() and (
+                    not str(fallback or "").strip() or is_d1_model(fallback)
+                ):
+                    warnings.append("D1 未配置 API Key 或可用聊天备用模型，审核请求会失败")
+            message = "已开启本群 LLM 消息审核。"
+            if warnings:
+                message += "注意：" + "；".join(warnings) + "。"
+            return {"status": "success", "message": message}
+
         group_id = event.get_group_id()
         if not group_id:
             return {"status": "error", "message": "此操作仅可在群聊中进行。"}
-        if self._permission_verification(group_id):
-            has_perm, error_msg = await check_group_and_permission(
-                event, self._allow_groupadmin_use(group_id), event.get_sender_name()
-            )
-            if not has_perm:
-                return {"status": "error", "message": error_msg or "权限不足。"}
+        permission_error = await self._group_command_permission_error(event, group_id)
+        if permission_error:
+            return {"status": "error", "message": permission_error}
         return await self._cancel_group_schedules(str(group_id), send_notice=False)
 
     @filter.command("群管")
@@ -2596,18 +2699,27 @@ class LLMGroupGuardPlugin(Star):
             return event.plain_result("机器人在本群不是群主/管理员，群管功能已停用。")
 
         mentions = self._extract_at_list(event)
+        # If the bot itself was @-mentioned to wake the command, it is not a
+        # valid moderation target and must not make an otherwise single-target
+        # request look ambiguous.
+        self_id = str(event.get_self_id())
+        mentions = [(uid, name) for uid, name in mentions if str(uid) != self_id]
         request_text = strip_group_command_prefix(
             self._strip_at_text(event.message_str or "", mentions)
         )
         if not request_text:
             return event.plain_result(
                 "请在指令后描述操作，例如：/群管 帮我禁言 @成员 10分钟；"
-                "也支持全体禁言、定时禁言任务的查询/设置/取消。"
+                "也支持全体禁言、定时禁言任务，以及开关高召回模式和 LLM 审核。"
             )
 
         model_ids = self._group_command_model_ids(group_id)
         if not model_ids:
-            if is_d1_model(self._gconf(group_id).get("llm_chat")):
+            group_conf = self._gconf(group_id)
+            if any(
+                is_d1_model(group_conf.get(key))
+                for key in ("llm_chat", "llm_chat_fallback")
+            ):
                 return event.plain_result(
                     "当前群选择的是 D1 决策模型，它不支持工具调用；"
                     "请在群配置中选择一个聊天模型，或配置可用于工具调用的备用聊天模型。"

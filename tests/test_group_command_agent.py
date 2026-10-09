@@ -3,6 +3,7 @@ import unittest
 from types import SimpleNamespace
 
 from core.group_command_agent import (
+    GROUP_COMMAND_TOOL_NAMES,
     GroupCommandExecutionError,
     GroupCommandProviderError,
     GroupCommandToolError,
@@ -34,6 +35,11 @@ class GroupCommandInputTests(unittest.TestCase):
         self.assertEqual("帮我禁言 @小明", strip_group_command_prefix("群管 帮我禁言 @小明"))
         self.assertEqual("帮我禁言", strip_group_command_prefix("/群管 帮我禁言"))
         self.assertEqual("帮我禁言", strip_group_command_prefix("[CQ:at,qq=10001] 群管 帮我禁言"))
+        self.assertEqual("帮我禁言", strip_group_command_prefix("[At:10001] 群管 帮我禁言"))
+
+    def test_high_recall_and_llm_audit_toggle_tools_are_exposed(self):
+        self.assertIn("set_group_high_recall_mode", GROUP_COMMAND_TOOL_NAMES)
+        self.assertIn("set_group_llm_audit", GROUP_COMMAND_TOOL_NAMES)
 
     def test_mention_context_keeps_only_unique_numeric_targets(self):
         self.assertEqual(
@@ -90,6 +96,30 @@ class GroupCommandToolLoopTests(unittest.IsolatedAsyncioTestCase):
             [("set_group_member_ban", {"user_id": "10001", "enable": True, "duration": 600})],
             executed,
         )
+
+    async def test_high_recall_and_llm_audit_calls_are_allowed(self):
+        for name in ("set_group_high_recall_mode", "set_group_llm_audit"):
+            with self.subTest(tool=name):
+                provider = FakeProvider(
+                    response=SimpleNamespace(
+                        role="tool",
+                        completion_text="",
+                        tools_call_name=[name],
+                        tools_call_args=[{"action": "toggle"}],
+                    )
+                )
+                executed = []
+
+                async def executor(tool_name, arguments):
+                    executed.append((tool_name, arguments))
+                    return {"status": "success", "message": "开关已更新"}
+
+                outcome = await run_group_command_tool_once(
+                    provider, "开启", object(), executor, timeout=1
+                )
+                self.assertEqual(name, outcome.tool_name)
+                self.assertEqual("success", outcome.status)
+                self.assertEqual([(name, {"action": "toggle"})], executed)
 
     async def test_no_tool_call_never_executes_anything(self):
         provider = FakeProvider(
