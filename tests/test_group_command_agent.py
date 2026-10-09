@@ -41,6 +41,12 @@ class GroupCommandInputTests(unittest.TestCase):
         self.assertIn("set_group_high_recall_mode", GROUP_COMMAND_TOOL_NAMES)
         self.assertIn("set_group_llm_audit", GROUP_COMMAND_TOOL_NAMES)
 
+    def test_schedule_delete_tool_is_exposed(self):
+        self.assertIn("delete_group_ban_schedule", GROUP_COMMAND_TOOL_NAMES)
+
+    def test_join_approval_toggle_tool_is_exposed(self):
+        self.assertIn("set_group_join_approval", GROUP_COMMAND_TOOL_NAMES)
+
     def test_mention_context_keeps_only_unique_numeric_targets(self):
         self.assertEqual(
             [
@@ -120,6 +126,56 @@ class GroupCommandToolLoopTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(name, outcome.tool_name)
                 self.assertEqual("success", outcome.status)
                 self.assertEqual([(name, {"action": "toggle"})], executed)
+
+    async def test_join_approval_toggle_tool_call_is_allowed(self):
+        provider = FakeProvider(
+            response=SimpleNamespace(
+                role="tool",
+                completion_text="",
+                tools_call_name=["set_group_join_approval"],
+                tools_call_args=[{"action": "toggle"}],
+            )
+        )
+        executed = []
+
+        async def executor(name, arguments):
+            executed.append((name, arguments))
+            return {"status": "success", "message": "入群审批开关已更新"}
+
+        outcome = await run_group_command_tool_once(
+            provider, "切换入群审批", object(), executor, timeout=1
+        )
+        self.assertEqual("set_group_join_approval", outcome.tool_name)
+        self.assertEqual("success", outcome.status)
+        self.assertEqual(
+            [("set_group_join_approval", {"action": "toggle"})],
+            executed,
+        )
+
+    async def test_schedule_delete_tool_call_is_allowed(self):
+        provider = FakeProvider(
+            response=SimpleNamespace(
+                role="tool",
+                completion_text="",
+                tools_call_name=["delete_group_ban_schedule"],
+                tools_call_args=[{"task_id": "a1b2c3d4e5f6"}],
+            )
+        )
+        executed = []
+
+        async def executor(name, arguments):
+            executed.append((name, arguments))
+            return {"status": "success", "message": "已删除"}
+
+        outcome = await run_group_command_tool_once(
+            provider, "删除指定定时禁言", object(), executor, timeout=1
+        )
+        self.assertEqual("delete_group_ban_schedule", outcome.tool_name)
+        self.assertEqual("success", outcome.status)
+        self.assertEqual(
+            [("delete_group_ban_schedule", {"task_id": "a1b2c3d4e5f6"})],
+            executed,
+        )
 
     async def test_no_tool_call_never_executes_anything(self):
         provider = FakeProvider(

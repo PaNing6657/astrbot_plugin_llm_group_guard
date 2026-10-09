@@ -26,6 +26,8 @@ GROUP_COMMAND_SYSTEM_PROMPT = """你是群管理指令解析器，只负责把�
 8. 高召回只在群消息 LLM 审核开启时对消息审核生效；关闭 LLM 审核不会关闭独立的关键词检测。
 9. 如果用户要求同时切换多个开关，先请用户拆成多条 /群管 指令；一次只能变更一个开关。
 10. 开关工具的 action 只能是 enable、disable 或 toggle；“开启/打开”用 enable，“关闭”用 disable，明确要求“切换/反转”时用 toggle。仅询问状态时不要调用开关工具。
+11. 删除定时禁言只删除明确目标：可用任务 ID、唯一的任务类型或每周星期规则；目标不唯一时先让用户确认。只有用户明确要求全部取消时才调用取消全部任务工具。
+12. 入群审批开关只控制新成员加群申请的自动审核，不等同于群消息 LLM 审核开关。
 """
 
 
@@ -118,6 +120,29 @@ GROUP_COMMAND_TOOL_SPECS = (
         },
     },
     {
+        "name": "delete_group_ban_schedule",
+        "description": "删除一个定时全体禁言任务。优先传任务 ID；也可传唯一任务类型 once/daily/weekly，或传 weekdays 删除每周任务中的星期规则。若不传选择条件，仅当全群只有一个任务时才删除它。不要用此工具代替取消全部任务。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "要删除的确切任务 ID（可从定时任务查询结果中查看）。",
+                },
+                "mode": {
+                    "type": "string",
+                    "enum": ["once", "daily", "weekly"],
+                    "description": "仅当此类型在当前群唯一时使用：once=单次，daily=每日重复，weekly=整条每周任务。",
+                },
+                "weekdays": {
+                    "type": "string",
+                    "description": "从每周任务中删除的星期规则，如 周一、周一-周五、周末、每天。",
+                },
+            },
+            "additionalProperties": False,
+        },
+    },
+    {
         "name": "set_group_high_recall_mode",
         "description": "手动开启、关闭或切换当前群的高召回审核模式；只切换当前生效状态，不修改每日定时配置。",
         "parameters": {
@@ -136,6 +161,22 @@ GROUP_COMMAND_TOOL_SPECS = (
     {
         "name": "set_group_llm_audit",
         "description": "开启、关闭或切换当前群的 LLM 消息审核开关；不改变独立的关键词检测开关。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "action": {
+                    "type": "string",
+                    "enum": ["enable", "disable", "toggle"],
+                    "description": "enable=开启，disable=关闭，toggle=反转当前状态。",
+                }
+            },
+            "required": ["action"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "set_group_join_approval",
+        "description": "开启、关闭或切换当前群的新成员加群申请自动审核；这是入群审批开关，不是群消息审核开关。",
         "parameters": {
             "type": "object",
             "properties": {

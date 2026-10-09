@@ -5,6 +5,7 @@ import os
 import re
 import time
 import traceback
+from datetime import datetime, timedelta
 from typing import Optional
 
 from astrbot.api import AstrBotConfig, logger
@@ -2501,8 +2502,10 @@ class LLMGroupGuardPlugin(Star):
             },
             "list_group_ban_schedules": set(),
             "cancel_group_ban_schedules": set(),
+            "delete_group_ban_schedule": {"task_id", "mode", "weekdays"},
             "set_group_high_recall_mode": {"action"},
             "set_group_llm_audit": {"action"},
+            "set_group_join_approval": {"action"},
         }[name]
         unexpected = set(arguments) - allowed_fields
         if unexpected:
@@ -2582,6 +2585,17 @@ class LLMGroupGuardPlugin(Star):
 
         if name == "list_group_ban_schedules":
             return await self.list_group_ban_schedules(event)
+
+        if name == "delete_group_ban_schedule":
+            group_id = event.get_group_id()
+            if not group_id:
+                return {"status": "error", "message": "此操作仅可在群聊中进行。"}
+            permission_error = await self._group_command_permission_error(event, group_id)
+            if permission_error:
+                return {"status": "error", "message": permission_error}
+            return await self._delete_group_command_schedule(
+                event, str(group_id), arguments
+            )
 
         if name == "set_group_high_recall_mode":
             action = arguments.get("action")
@@ -2666,6 +2680,45 @@ class LLMGroupGuardPlugin(Star):
                 message += "注意：" + "；".join(warnings) + "。"
             return {"status": "success", "message": message}
 
+        if name == "set_group_join_approval":
+            action = arguments.get("action")
+            if action not in ("enable", "disable", "toggle"):
+                return {"status": "error", "message": "无法确认是开启、关闭还是切换入群审批。"}
+            group_id = event.get_group_id()
+            if not group_id:
+                return {"status": "error", "message": "此操作仅可在群聊中进行。"}
+            permission_error = await self._group_command_permission_error(event, group_id)
+            if permission_error:
+                return {"status": "error", "message": permission_error}
+
+            gconf = self._gconf(group_id)
+            enable = action == "enable" if action != "toggle" else not bool(gconf.get("join_verify_enable"))
+            gconf["join_verify_enable"] = enable
+            self._save_config()
+            if not enable:
+                return {
+                    "status": "success",
+                    "message": "已关闭本群自动入群审批；后续加群申请将留待管理员手动处理。",
+                }
+
+            warnings = []
+            if not str(gconf.get("join_prompt") or "").strip():
+                warnings.append("未填写入群审核要求，普通申请不会由 LLM 自动同意或拒绝")
+            join_chat = self._join_model(gconf, "join_llm_chat", "llm_chat")
+            join_fallback = self._join_model(
+                gconf, "join_llm_chat_fallback", "llm_chat_fallback"
+            )
+            if not join_chat:
+                warnings.append("未选择入群审核主模型，LLM 审批可能无法执行")
+            elif is_d1_model(join_chat) and (
+                not join_fallback or is_d1_model(join_fallback)
+            ):
+                warnings.append("入群审批不支持 D1，需配置聊天模型作为备用模型")
+            message = "已开启本群自动入群审批。"
+            if warnings:
+                message += "注意：" + "；".join(warnings) + "。"
+            return {"status": "success", "message": message}
+
         group_id = event.get_group_id()
         if not group_id:
             return {"status": "error", "message": "此操作仅可在群聊中进行。"}
@@ -2710,7 +2763,7 @@ class LLMGroupGuardPlugin(Star):
         if not request_text:
             return event.plain_result(
                 "请在指令后描述操作，例如：/群管 帮我禁言 @成员 10分钟；"
-                "也支持全体禁言、定时禁言任务，以及开关高召回模式和 LLM 审核。"
+                "也支持全体禁言、定时禁言任务的设置/查询/删除/取消，以及开关高召回、LLM 审核和入群审批。"
             )
 
         model_ids = self._group_command_model_ids(group_id)
@@ -3056,41 +3109,185 @@ class LLMGroupGuardPlugin(Star):
             f"发送 /定时禁言 可查询全部规则，/定时禁言 删除 {days_txt.split('、')[0]} 可删除。"
         )
 
-    async def _delete_weekly_rule(self, event: AstrMessageEvent, group_id, spec: str) -> object:
+    async def _delete_weekly_schedule_rules(
+        self, event, group_id, spec: str, send_notice: bool = True
+    ) -> dict:
         weekday_set = _parse_weekday_spec(spec)
         if weekday_set is None:
-            return event.plain_result(f"无法识别的星期：{spec}（示例：周一、周五-周一、周末）")
+            return {
+                "status": "error",
+                "message": f"无法识别的星期：{spec}（示例：周一、周五-周一、周末）",
+            }
         old = next(
             (t for t in self.scheduler.get(str(group_id)) if t.get("mode") == "weekly"), None
         )
         if not old:
-            return event.plain_result("本群没有按周几设置的禁言规则")
-        rules = old.get("rules") or {}
-        removed = [d for d in weekday_set if d in rules]
+            return {"status": "error", "message": "本群没有按周几设置的禁言规则"}
+
+        old_rules = dict(old.get("rules") or {})
+        configured_days = {
+            int(day) for day in old_rules
+            if str(day).isdigit() and 1 <= int(day) <= 7
+        }
+        removed = (
+            sorted(configured_days)
+            if weekday_set == "all"
+            else sorted(set(weekday_set) & configured_days)
+        )
         if not removed:
-            return event.plain_result("这些星期没有设置规则")
-        for d in removed:
-            rules.pop(str(d))
-        if old.get("started"):
-            await self._apply_scheduled(group_id, old, enable=False)
-            old["started"] = False
-            old["current_end_ts"] = 0
-        if rules:
-            self.scheduler.set_weekly(str(group_id), rules, bot=event.bot)
-            days_txt = "、".join(_WEEKDAY_CN[d] for d in sorted(removed))
-            return event.plain_result(f"已删除 {days_txt} 的禁言规则")
+            return {"status": "error", "message": "这些星期没有设置规则"}
+
+        new_rules = dict(old_rules)
+        for day in removed:
+            new_rules.pop(str(day), None)
+            new_rules.pop(day, None)
+
+        now = time.time()
+        today = datetime.fromtimestamp(now).replace(hour=0, minute=0, second=0, microsecond=0)
+        active_rule_days = set()
+        # A weekly mute may cross midnight, so inspect the prior week as well as today.
+        for offset in range(8):
+            day = today - timedelta(days=offset)
+            weekday = day.weekday() + 1
+            rule = old_rules.get(str(weekday)) or old_rules.get(weekday)
+            if not rule:
+                continue
+            start_ts = day.timestamp() + int(rule.get("start_min") or 0) * 60
+            end_ts = start_ts + int(rule.get("duration_min") or 0) * 60
+            if start_ts <= now < end_ts:
+                active_rule_days.add(weekday)
+        active_day_remains = bool(new_rules) and (
+            not active_rule_days or bool(active_rule_days - set(removed))
+        )
+        if old.get("started") and not active_day_remains:
+            ok, msg = await self._apply_scheduled(
+                group_id, old, enable=False, send_notice=send_notice
+            )
+            if not ok:
+                return {
+                    "status": "error",
+                    "message": f"解除当前全体禁言失败，周规则未删除：{msg}",
+                }
+
+        days_txt = "、".join(_WEEKDAY_CN[day] for day in removed)
+        if new_rules:
+            old["rules"] = new_rules
+            if old.get("started") and not active_day_remains:
+                old["started"] = False
+                old["current_end_ts"] = 0
+            self.scheduler.save()
+            return {"status": "success", "message": f"已删除 {days_txt} 的定时禁言规则"}
+
         self.scheduler.remove(str(group_id), old.get("id"))
-        return event.plain_result("已删除全部周规则，每周禁言任务已移除")
+        return {"status": "success", "message": "已删除全部周规则，每周定时禁言任务已移除"}
+
+    async def _delete_weekly_rule(self, event: AstrMessageEvent, group_id, spec: str) -> object:
+        result = await self._delete_weekly_schedule_rules(
+            event, group_id, spec, send_notice=True
+        )
+        return event.plain_result(result["message"])
+
+    async def _delete_scheduled_task_by_id(
+        self, group_id, task_id: str, send_notice: bool = False
+    ) -> dict:
+        task = self.scheduler.get_task(str(group_id), str(task_id))
+        if not task:
+            return {"status": "error", "message": f"找不到任务 ID「{task_id}」"}
+
+        description = self._describe_task(group_id, task)
+        if task.get("started"):
+            ok, msg = await self._apply_scheduled(
+                group_id, task, enable=False, send_notice=send_notice
+            )
+            if not ok:
+                return {
+                    "status": "error",
+                    "message": f"解除当前全体禁言失败，任务仍保留以便重试：{msg}",
+                }
+
+        removed = self.scheduler.remove(str(group_id), str(task_id))
+        if not removed:
+            return {"status": "error", "message": "任务状态已变化，请重新查询后再删除"}
+        return {
+            "status": "success",
+            "message": f"已删除定时禁言任务 ID={task_id}：{description}",
+        }
+
+    async def _delete_group_command_schedule(
+        self, event, group_id: str, arguments: dict
+    ) -> dict:
+        raw_task_id = arguments.get("task_id")
+        raw_mode = arguments.get("mode")
+        raw_weekdays = arguments.get("weekdays")
+        if raw_task_id is not None and not isinstance(raw_task_id, str):
+            return {"status": "error", "message": "任务 ID 参数无效。"}
+        if raw_mode is not None and not isinstance(raw_mode, str):
+            return {"status": "error", "message": "任务类型参数无效。"}
+        if raw_weekdays is not None and not isinstance(raw_weekdays, str):
+            return {"status": "error", "message": "星期参数无效。"}
+
+        task_id = str(raw_task_id or "").strip()
+        mode = str(raw_mode or "").strip().lower()
+        weekdays = str(raw_weekdays or "").strip()
+        selectors = sum(bool(value) for value in (task_id, mode, weekdays))
+        if selectors > 1:
+            return {
+                "status": "error",
+                "message": "请只指定一个删除目标：任务 ID、任务类型或每周星期规则。",
+            }
+
+        tasks = self.scheduler.get(str(group_id))
+        if not tasks:
+            return {"status": "success", "message": "本群当前没有定时全体禁言任务"}
+
+        if weekdays:
+            return await self._delete_weekly_schedule_rules(
+                event, group_id, weekdays, send_notice=False
+            )
+        if task_id:
+            return await self._delete_scheduled_task_by_id(
+                group_id, task_id, send_notice=False
+            )
+        if mode:
+            if mode not in ("once", "daily", "weekly"):
+                return {"status": "error", "message": "任务类型应为 once、daily 或 weekly。"}
+            matches = [task for task in tasks if str(task.get("mode") or "") == mode]
+            if not matches:
+                return {"status": "error", "message": f"本群没有 {mode} 类型的定时禁言任务"}
+            if len(matches) > 1:
+                lines = [f"本群有 {len(matches)} 个 {mode} 定时任务，请指定任务 ID："]
+                lines.extend(
+                    f"ID={task.get('id')}：{self._describe_task(group_id, task)}"
+                    for task in matches
+                )
+                return {"status": "error", "message": "\n".join(lines)}
+            return await self._delete_scheduled_task_by_id(
+                group_id, str(matches[0].get("id") or ""), send_notice=False
+            )
+
+        if len(tasks) == 1:
+            return await self._delete_scheduled_task_by_id(
+                group_id, str(tasks[0].get("id") or ""), send_notice=False
+            )
+        lines = [f"本群有 {len(tasks)} 个定时禁言任务，请指定任务 ID 或任务类型："]
+        lines.extend(
+            f"ID={task.get('id')}：{self._describe_task(group_id, task)}"
+            for task in tasks
+        )
+        return {"status": "error", "message": "\n".join(lines)}
 
     def _query_schedule(self, event: AstrMessageEvent, group_id) -> object:
         tasks = self.scheduler.get(str(group_id))
         if not tasks:
             return event.plain_result("本群当前没有定时全体禁言任务")
         if len(tasks) == 1:
-            return event.plain_result(self._describe_task(group_id, tasks[0]))
+            task = tasks[0]
+            return event.plain_result(
+                f"任务 ID={task.get('id')}：{self._describe_task(group_id, task)}"
+            )
         lines = [f"本群共有 {len(tasks)} 个定时全体禁言任务："]
-        for i, t in enumerate(tasks, 1):
-            lines.append(f"{i}. {self._describe_task(group_id, t)}")
+        for i, task in enumerate(tasks, 1):
+            lines.append(f"{i}. ID={task.get('id')}：{self._describe_task(group_id, task)}")
         lines.append("发送 /定时禁言 取消 可取消本群全部任务")
         return event.plain_result("\n".join(lines))
 
@@ -3277,7 +3474,10 @@ class LLMGroupGuardPlugin(Star):
                 for t in tasks
             ]
             lines = [f"本群共有 {len(schedules)} 个定时全体禁言任务："]
-            lines += [f"{i}. {s['description']}" for i, s in enumerate(schedules, 1)]
+            lines += [
+                f"{i}. ID={s['id']}：{s['description']}"
+                for i, s in enumerate(schedules, 1)
+            ]
             return {
                 "status": "success",
                 "count": len(schedules),
