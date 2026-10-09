@@ -7,7 +7,7 @@
 <meta name="theme-color" content="#f4f8fd">
 <meta name="color-scheme" content="light">
 <title>LLM 群守卫 · 管理台</title>
-<link rel="stylesheet" href="style.css?v=1.2.1">
+<link rel="stylesheet" href="style.css?v=1.2.3">
 </head>
 <body>
 <div class="shell">
@@ -358,6 +358,14 @@
         <div class="page-note" style="margin-bottom: 12px;">
           记录每一次自动同意 / 拒绝入群操作：来源区分「LLM 审核」与「退群拦截」，失败操作（如已被人工先审批）也会标注；查看与清理不依赖群管理权限
         </div>
+        <div class="join-record-filter">
+          <label for="joinRecordFilter">操作筛选</label>
+          <select id="joinRecordFilter">
+            <option value="">全部操作</option>
+            <option value="approve">仅显示同意</option>
+            <option value="reject">仅显示拒绝</option>
+          </select>
+        </div>
         <div class="table-wrap">
           <table class="data-table">
             <thead>
@@ -381,7 +389,7 @@
       </div>
       <div class="card">
         <p class="page-note" style="margin-bottom: 14px;">
-          绑定关系全局共用。入群审批验证通过且 OID 合规时会自动添加；成员触发禁言时，只会同步禁言同 OID 且当前群内的其他绑定 QQ。群主 / 管理员不会被联动禁言，解除禁言只作用于被操作的 QQ。
+          绑定关系全局共用。入群审批验证通过且 OID 合规时会自动添加；成员触发禁言时，只会同步禁言同 OID 且当前群内的其他绑定 QQ。群主 / 管理员不会被联动禁言，解除禁言只作用于被操作的 QQ。同 OID 的 QQ 默认折叠显示，点击展开可查看其余绑定。
         </p>
         <div class="form-grid" style="margin-bottom: 14px;">
           <div class="field">
@@ -400,7 +408,7 @@
         <div class="table-wrap">
           <table class="data-table">
             <thead>
-              <tr><th>QQ 号</th><th>OID</th><th>操作</th></tr>
+              <tr><th>OID</th><th>QQ 号</th><th>操作</th></tr>
             </thead>
             <tbody id="oidBindingBody"></tbody>
           </table>
@@ -553,6 +561,6 @@
 </div>
 
 <!-- module 脚本延迟执行，确保在 AstrBot 注入的 bridge SDK 之后运行 -->
-<script type="module" src="app.js?v=1.8.1"></script>
+<script type="module" src="app.js?v=1.8.3"></script>
 </body>
 </html>

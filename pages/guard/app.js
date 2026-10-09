@@ -1,3 +1,12 @@
+import {
+  canExpandOidBindingGroup,
+  countOidBindings,
+  getVisibleOidBindings,
+  groupOidBindings,
+  reconcileExpandedOidBindingGroups,
+  toggleOidBindingGroup,
+} from "./oid_bindings_view.mjs";
+
 /* LLM 群守卫 WebUI：多群管理，进入先选群；LLM 复用 AstrBot 已配置模型 */
 const bridge = window.AstrBotPluginPage;
 const $ = (id) => document.getElementById(id);
@@ -906,18 +915,17 @@ $("rejoinRecordsClear").addEventListener("click", (e) => {
 /* ---------- 进群记录（同意 / 拒绝操作，按当前群） ---------- */
 const JOIN_ACTION_LABELS = { approve: "同意", reject: "拒绝" };
 const JOIN_SOURCE_LABELS = { llm: "LLM 审核", rejoin_block: "退群拦截" };
+let joinRecordRows = [];
 
-async function loadJoinRecords() {
-  if (!currentGroup) return;
-  let data;
-  try {
-    data = await api("join-records", "GET", { group_id: currentGroup });
-  } catch (e) {
-    toast("joinRecordToast", "进群记录加载失败：" + e, true);
-    return;
-  }
-  const rows = data.records || [];
-  $("joinRecordEmpty").classList.toggle("hidden", rows.length > 0);
+function renderJoinRecords() {
+  const filter = $("joinRecordFilter").value;
+  const rows = joinRecordRows.filter((record) => !filter || record.action === filter);
+  const empty = $("joinRecordEmpty");
+  empty.textContent = joinRecordRows.length > 0
+    ? "当前筛选条件下暂无进群操作记录"
+    : "暂无进群操作记录（开启自动审批后自动记录）";
+  empty.classList.toggle("hidden", rows.length > 0);
+
   const tbody = $("joinRecordBody");
   tbody.innerHTML = "";
   rows.forEach((r) => {
@@ -939,6 +947,20 @@ async function loadJoinRecords() {
   bindTableOverflow();
 }
 
+async function loadJoinRecords() {
+  if (!currentGroup) return;
+  let data;
+  try {
+    data = await api("join-records", "GET", { group_id: currentGroup });
+  } catch (e) {
+    toast("joinRecordToast", "进群记录加载失败：" + e, true);
+    return;
+  }
+  joinRecordRows = Array.isArray(data.records) ? data.records : [];
+  renderJoinRecords();
+}
+
+$("joinRecordFilter").addEventListener("change", () => renderJoinRecords());
 $("joinRecordsRefresh").addEventListener("click", () => loadJoinRecords());
 $("joinRecordsClear").addEventListener("click", (e) => {
   const btn = e.currentTarget;
@@ -962,28 +984,73 @@ $("joinRecordsClear").addEventListener("click", (e) => {
 });
 
 /* ---------- 全局 QQ-OID 绑定 ---------- */
+let oidBindingRows = [];
+const expandedOidGroups = new Set();
+
+async function deleteOidBinding(binding) {
+  try {
+    const result = await api("oid-bindings/delete", "POST", { user_id: binding.user_id });
+    toast("oidBindingToast", result.deleted ? "已删除该绑定" : "绑定记录不存在");
+    renderOidBindings(result.bindings || []);
+  } catch (e) {
+    toast("oidBindingToast", "删除失败：" + e, true);
+  }
+}
+
 function renderOidBindings(bindings) {
   const rows = Array.isArray(bindings) ? bindings : [];
-  $("oidBindingCount").textContent = `共 ${rows.length} 条`;
+  oidBindingRows = rows;
+  const groups = groupOidBindings(rows);
+  reconcileExpandedOidBindingGroups(expandedOidGroups, groups);
+  $("oidBindingCount").textContent =
+    `共 ${countOidBindings(rows)} 条绑定（${groups.length} 个 OID）`;
   $("oidBindingEmpty").classList.toggle("hidden", rows.length > 0);
+
   const tbody = $("oidBindingBody");
   tbody.innerHTML = "";
-  rows.forEach((binding) => {
+  groups.forEach((group) => {
+    const expandable = canExpandOidBindingGroup(group);
+    const expanded = expandable && expandedOidGroups.has(group.oid);
+    const visibleBindings = getVisibleOidBindings(group, expandedOidGroups);
+    const primaryBinding = visibleBindings[0];
+    const toggleLabel = expanded ? "收起" : `展开另外 ${group.bindings.length - 1} 个`;
     const tr = document.createElement("tr");
+    tr.className = "oid-binding-group-row";
+    tr.classList.toggle("expanded", expanded);
     tr.innerHTML =
-      `<td>${escapeHtml(binding.user_id || "")}</td>` +
-      `<td>${escapeHtml(binding.oid || "")}</td>` +
-      '<td><button class="btn ghost sm danger">删除</button></td>';
-    tr.querySelector("button").addEventListener("click", async () => {
-      try {
-        const result = await api("oid-bindings/delete", "POST", { user_id: binding.user_id });
-        toast("oidBindingToast", result.deleted ? "已删除该绑定" : "绑定记录不存在");
-        renderOidBindings(result.bindings || []);
-      } catch (e) {
-        toast("oidBindingToast", "删除失败：" + e, true);
-      }
+      `<td>${escapeHtml(group.oid || "")}</td>` +
+      '<td><div class="oid-binding-user-summary">' +
+      `<span>${escapeHtml(primaryBinding.user_id || "")}</span>` +
+      (expandable
+        ? `<button class="btn ghost sm oid-binding-expand" type="button" aria-expanded="${expanded}">${toggleLabel}</button>`
+        : "") +
+      '</div></td>' +
+      '<td><button class="btn ghost sm danger oid-binding-delete" type="button">删除</button></td>';
+    tr.querySelector(".oid-binding-delete").addEventListener("click", () => {
+      deleteOidBinding(primaryBinding);
     });
+    if (expandable) {
+      tr.querySelector(".oid-binding-expand").addEventListener("click", () => {
+        toggleOidBindingGroup(expandedOidGroups, group.oid);
+        renderOidBindings(oidBindingRows);
+      });
+    }
     tbody.appendChild(tr);
+
+    if (expanded) {
+      visibleBindings.slice(1).forEach((binding) => {
+        const detailRow = document.createElement("tr");
+        detailRow.className = "oid-binding-detail-row";
+        detailRow.innerHTML =
+          '<td></td>' +
+          `<td><span class="oid-binding-detail-marker" aria-hidden="true">↳</span>${escapeHtml(binding.user_id || "")}</td>` +
+          '<td><button class="btn ghost sm danger oid-binding-delete" type="button">删除</button></td>';
+        detailRow.querySelector(".oid-binding-delete").addEventListener("click", () => {
+          deleteOidBinding(binding);
+        });
+        tbody.appendChild(detailRow);
+      });
+    }
   });
   bindTableOverflow();
 }
